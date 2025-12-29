@@ -7,7 +7,6 @@ import "@openzeppelin-upgrades/contracts/proxy/utils/Initializable.sol";
 
 import "../../interfaces/IFdChainBase.sol";
 import "../../interfaces/IFdChainDepositManager.sol";
-import "../../access/interfaces/IPauserRegistry.sol";
 
 contract FdChainBase is Initializable, IFdChainBase, Pausable {
     uint8 internal constant PAUSED_DEPOSITS = 0;
@@ -16,7 +15,7 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
     uint256 internal constant SHARES_OFFSET = 1e3;
     uint256 internal constant BALANCE_OFFSET = 1e3;
 
-    uint256 internal constant MAX_STAKER_NUMBERS = 32;
+    uint256 internal constant MAX_STAKER_NUMBERS = 320;
 
     address[] stakerList;
 
@@ -31,12 +30,18 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
     uint256 public stakerNumbers;
 
     modifier onlyStrategyManager() {
-        require(msg.sender == address(FdChainDepositManager), "FdChainBase.onlyStrategyManager");
+        require(
+            msg.sender == address(FdChainDepositManager),
+            "FdChainBase.onlyStrategyManager"
+        );
         _;
     }
 
     modifier onlyStakerNumbersLessThanMaxLimit() {
-        require(stakerNumbers < MAX_STAKER_NUMBERS, "Stakers too much in this pool");
+        require(
+            stakerNumbers < MAX_STAKER_NUMBERS,
+            "Stakers too much in this pool"
+        );
         _;
     }
 
@@ -55,11 +60,16 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
         FdChainDepositManager = _FdChainDepositManager;
     }
 
-    function _initializeFdChainBase(IPauserRegistry _pauserRegistry) internal onlyInitializing {
+    function _initializeFdChainBase(
+        IPauserRegistry _pauserRegistry
+    ) internal onlyInitializing {
         _initializePauser(_pauserRegistry, UNPAUSE_ALL);
     }
 
-    function deposit(uint256 amount, address staker)
+    function deposit(
+        uint256 amount,
+        address staker
+    )
         external
         payable
         virtual
@@ -68,18 +78,27 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
         onlyStakerNumbersLessThanMaxLimit
         returns (uint256 newShares)
     {
-        require(amount >= minDeposit, "FdChainBase: deposit token must more than min deposit amount");
-        require(amount <= maxDeposit, "FdChainBase: deposit token must less than max deposit amount");
+        require(
+            amount >= minDeposit,
+            "FdChainBase: deposit token must more than min deposit amount"
+        );
+        require(
+            amount <= maxDeposit,
+            "FdChainBase: deposit token must less than max deposit amount"
+        );
 
         uint256 priorTotalShares = totalShares;
 
         uint256 virtualShareAmount = priorTotalShares + SHARES_OFFSET;
-        uint256 virtualTokenBalance = twBalance() + BALANCE_OFFSET;
+        uint256 virtualTokenBalance = dolBalance() + BALANCE_OFFSET;
 
         uint256 virtualPriorTokenBalance = virtualTokenBalance - amount;
         newShares = (amount * virtualShareAmount) / virtualPriorTokenBalance;
 
-        require(newShares != 0, "FdChainBase.deposit: new shares cannot be zero");
+        require(
+            newShares != 0,
+            "FdChainBase.deposit: new shares cannot be zero"
+        );
 
         totalShares = (priorTotalShares + newShares);
 
@@ -94,13 +113,10 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
         return newShares;
     }
 
-    function withdraw(address recipient, uint256 amountShares)
-        external
-        virtual
-        override
-        whenNotPaused
-        onlyStrategyManager
-    {
+    function withdraw(
+        address recipient,
+        uint256 amountShares
+    ) external virtual override whenNotPaused onlyStrategyManager {
         uint256 priorTotalShares = totalShares;
         require(
             amountShares <= priorTotalShares,
@@ -108,9 +124,10 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
         );
 
         uint256 virtualPriorTotalShares = priorTotalShares + SHARES_OFFSET;
-        uint256 virtualTokenBalance = twBalance() + BALANCE_OFFSET;
+        uint256 virtualTokenBalance = dolBalance() + BALANCE_OFFSET;
 
-        uint256 amountToSend = (virtualTokenBalance * amountShares) / virtualPriorTotalShares;
+        uint256 amountToSend = (virtualTokenBalance * amountShares) /
+            virtualPriorTotalShares;
 
         totalShares = priorTotalShares - amountShares;
 
@@ -130,36 +147,55 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
         }
     }
 
-    function _afterWithdrawal(address recipient, uint256 amountToSend) internal virtual {
-        (bool success,) = payable(recipient).call{value: amountToSend}("");
-        require(success, "FdChainBase._afterWithdrawal: transfer tw failed");
+    function _afterWithdrawal(
+        address recipient,
+        uint256 amountToSend
+    ) internal virtual {
+        (bool success, ) = payable(recipient).call{value: amountToSend}("");
+        require(success, "FdChainBase._afterWithdrawal: transfer dol failed");
     }
 
-    function explanation() external pure virtual override returns (string memory) {
-        return "theweb3Chain Pos Staking Protocol";
+    function explanation()
+        external
+        pure
+        virtual
+        override
+        returns (string memory)
+    {
+        return "Dolphinnet Chain Pos Staking Protocol";
     }
 
-    function sharesToUnderlyingView(uint256 amountShares) public view virtual override returns (uint256) {
+    function sharesToUnderlyingView(
+        uint256 amountShares
+    ) public view virtual override returns (uint256) {
         uint256 virtualTotalShares = totalShares + SHARES_OFFSET;
-        uint256 virtualTokenBalance = twBalance() + BALANCE_OFFSET;
+        uint256 virtualTokenBalance = dolBalance() + BALANCE_OFFSET;
         return (virtualTokenBalance * amountShares) / virtualTotalShares;
     }
 
-    function sharesToUnderlying(uint256 amountShares) public view virtual override returns (uint256) {
+    function sharesToUnderlying(
+        uint256 amountShares
+    ) public view virtual override returns (uint256) {
         return sharesToUnderlyingView(amountShares);
     }
 
-    function underlyingToSharesView(uint256 amountUnderlying) public view virtual returns (uint256) {
+    function underlyingToSharesView(
+        uint256 amountUnderlying
+    ) public view virtual returns (uint256) {
         uint256 virtualTotalShares = totalShares + SHARES_OFFSET;
-        uint256 virtualTokenBalance = twBalance() + BALANCE_OFFSET;
+        uint256 virtualTokenBalance = dolBalance() + BALANCE_OFFSET;
         return (amountUnderlying * virtualTotalShares) / virtualTokenBalance;
     }
 
-    function underlyingToShares(uint256 amountUnderlying) external view virtual returns (uint256) {
+    function underlyingToShares(
+        uint256 amountUnderlying
+    ) external view virtual returns (uint256) {
         return underlyingToSharesView(amountUnderlying);
     }
 
-    function userUnderlyingView(address user) external view virtual returns (uint256) {
+    function userUnderlyingView(
+        address user
+    ) external view virtual returns (uint256) {
         return sharesToUnderlyingView(shares(user));
     }
 
@@ -171,7 +207,10 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
         return FdChainDepositManager.stakerFdChainBaseShares(user);
     }
 
-    function setDepositLimits(uint256 newMinDeposit, uint256 newMaxDeposit) external onlyStrategyManager {
+    function setDepositLimits(
+        uint256 newMinDeposit,
+        uint256 newMaxDeposit
+    ) external onlyStrategyManager {
         _setDepositLimits(newMinDeposit, newMaxDeposit);
     }
 
@@ -179,15 +218,21 @@ contract FdChainBase is Initializable, IFdChainBase, Pausable {
         return (minDeposit, maxDeposit);
     }
 
-    function _setDepositLimits(uint256 newMinDeposit, uint256 newMaxDeposit) internal {
+    function _setDepositLimits(
+        uint256 newMinDeposit,
+        uint256 newMaxDeposit
+    ) internal {
         emit MinDepositUpdated(minDeposit, newMinDeposit);
         emit MaxDepositUpdated(maxDeposit, newMaxDeposit);
-        require(minDeposit <= newMaxDeposit, "FdChainBase._setDepositLimits: minDeposit must less than maxDeposit");
+        require(
+            minDeposit <= newMaxDeposit,
+            "FdChainBase._setDepositLimits: minDeposit must less than maxDeposit"
+        );
         minDeposit = newMinDeposit;
         maxDeposit = newMaxDeposit;
     }
 
-    function twBalance() internal view virtual returns (uint256) {
+    function dolBalance() internal view virtual returns (uint256) {
         return address(this).balance;
     }
 

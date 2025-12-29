@@ -28,10 +28,11 @@ contract FdChainDepositManager is
         _disableInitializers();
     }
 
-    function initialize(address initialOwner, IDelegationManager _delegation, IFdChainBase _FdChainBase)
-        public
-        initializer
-    {
+    function initialize(
+        address initialOwner,
+        IDelegationManager _delegation,
+        IFdChainBase _FdChainBase
+    ) public initializer {
         _DOMAIN_SEPARATOR = _calculateDomainSeparator();
         __Ownable_init(initialOwner);
         _initFdChainDepositManagerStorage(_delegation, _FdChainBase);
@@ -39,18 +40,14 @@ contract FdChainDepositManager is
 
     receive() external payable {}
 
-    function depositIntotheweb3Chain(uint256 amount)
-        external
-        payable
-        whenNotPaused
-        nonReentrant
-        returns (uint256 shares)
-    {
+    function depositIntoDolphinnetChain(
+        uint256 amount
+    ) external payable whenNotPaused nonReentrant returns (uint256 shares) {
         require(amount == msg.value, "deposit value not match amount");
-        shares = _depositIntotheweb3Chain(msg.sender, amount);
+        shares = _depositIntoDolphinnetChain(msg.sender, amount);
     }
 
-    function depositIntotheweb3ChainWithSignature(
+    function depositIntoDolphinnetChainWithSignature(
         uint256 amount,
         address staker,
         uint256 expiry,
@@ -58,29 +55,47 @@ contract FdChainDepositManager is
     ) external payable whenNotPaused nonReentrant returns (uint256 shares) {
         require(amount == msg.value, "deposit value not match amount");
         require(
-            expiry >= block.timestamp, "FdChainDepositManager.depositIntotheweb3ChainWithSignature: signature expired"
+            expiry >= block.timestamp,
+            "FdChainDepositManager.depositIntoDolphinnetChainWithSignature: signature expired"
         );
         uint256 nonce = nonces[staker];
 
-        bytes32 structHash = keccak256(abi.encode(DEPOSIT_TYPEHASH, staker, amount, nonce, expiry));
+        bytes32 structHash = keccak256(
+            abi.encode(DEPOSIT_TYPEHASH, staker, amount, nonce, expiry)
+        );
 
         unchecked {
             nonces[staker] = nonce + 1;
         }
 
-        bytes32 digestHash = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
+        bytes32 digestHash = keccak256(
+            abi.encodePacked("\x19\x01", domainSeparator(), structHash)
+        );
 
-        EIP1271SignatureUtils.checkSignature_EIP1271(staker, digestHash, signature);
+        EIP1271SignatureUtils.checkSignature_EIP1271(
+            staker,
+            digestHash,
+            signature
+        );
 
-        shares = _depositIntotheweb3Chain(staker, amount);
+        shares = _depositIntoDolphinnetChain(staker, amount);
     }
 
-    function removeShares(address staker, uint256 shareAmount) external onlyDelegationManager {
-        require(shareAmount != 0, "FdChainDepositManager.removeShares: shareAmount should not be zero!");
+    function removeShares(
+        address staker,
+        uint256 shareAmount
+    ) external onlyDelegationManager {
+        require(
+            shareAmount != 0,
+            "FdChainDepositManager.removeShares: shareAmount should not be zero!"
+        );
 
         uint256 userShares = stakerFdChainBaseShares[staker];
 
-        require(shareAmount <= userShares, "FdChainDepositManager._removeShares: shareAmount too high");
+        require(
+            shareAmount <= userShares,
+            "FdChainDepositManager._removeShares: shareAmount too high"
+        );
 
         unchecked {
             userShares = userShares - shareAmount;
@@ -94,11 +109,17 @@ contract FdChainDepositManager is
         }
     }
 
-    function addShares(address staker, uint256 shares) external onlyDelegationManager {
+    function addShares(
+        address staker,
+        uint256 shares
+    ) external onlyDelegationManager {
         _addShares(staker, shares);
     }
 
-    function withdrawSharesAsCp(address recipient, uint256 shares) external onlyDelegationManager {
+    function withdrawSharesAsDol(
+        address recipient,
+        uint256 shares
+    ) external onlyDelegationManager {
         FdChainBase.withdraw(recipient, shares);
     }
 
@@ -115,7 +136,10 @@ contract FdChainDepositManager is
     }
 
     // ================= internal function =================
-    function _depositIntotheweb3Chain(address staker, uint256 amount) internal returns (uint256 shares) {
+    function _depositIntoDolphinnetChain(
+        address staker,
+        uint256 amount
+    ) internal returns (uint256 shares) {
         shares = FdChainBase.deposit{value: amount}(amount, staker);
 
         _addShares(staker, shares);
@@ -126,13 +150,27 @@ contract FdChainDepositManager is
     }
 
     function _addShares(address staker, uint256 shares) internal {
-        require(staker != address(0), "FdChainDepositManager._addShares: staker cannot be zero address");
-        require(shares != 0, "FdChainDepositManager._addShares: shares should not be zero!");
+        require(
+            staker != address(0),
+            "FdChainDepositManager._addShares: staker cannot be zero address"
+        );
+        require(
+            shares != 0,
+            "FdChainDepositManager._addShares: shares should not be zero!"
+        );
         stakerFdChainBaseShares[staker] += shares;
         emit Deposit(staker, FdChainBase, shares);
     }
 
     function _calculateDomainSeparator() internal view returns (bytes32) {
-        return keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes("theweb3Chain")), block.chainid, address(this)));
+        return
+            keccak256(
+                abi.encode(
+                    DOMAIN_TYPEHASH,
+                    keccak256(bytes("dolphinnetChain")),
+                    block.chainid,
+                    address(this)
+                )
+            );
     }
 }

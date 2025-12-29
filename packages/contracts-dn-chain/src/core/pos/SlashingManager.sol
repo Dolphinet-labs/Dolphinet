@@ -10,11 +10,19 @@ import "@/access/Pausable.sol";
 
 import "./SlashingManagerStorage.sol";
 
-contract SlashingManager is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, SlashingManagerStorage {
+contract SlashingManager is
+    Initializable,
+    OwnableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    SlashingManagerStorage
+{
     uint256 public constant SCALE = 1e18;
 
     modifier onlySlasher() {
-        require(msg.sender == slasherAddress, "SlashingManager.onlySlasher: only slasher can do this operation");
+        require(
+            msg.sender == slasherAddress,
+            "SlashingManager.onlySlasher: only slasher can do this operation"
+        );
         _;
     }
 
@@ -48,10 +56,14 @@ contract SlashingManager is Initializable, OwnableUpgradeable, ReentrancyGuardUp
         emit IsJail(operator, false);
     }
 
-    function freezeAndSlashingShares(address operator, uint256 slashShare) external onlySlasher returns (uint256) {
+    function freezeAndSlashingShares(
+        address operator,
+        uint256 slashShare
+    ) external onlySlasher returns (uint256) {
         slashingOperatorShares[operator] = slashShare;
 
-        (address[] memory stakers, uint256[] memory shares) = delegationManager.getStakerSharesOfOperator(operator);
+        (address[] memory stakers, uint256[] memory shares) = delegationManager
+            .getStakerSharesOfOperator(operator);
 
         require(
             stakers.length == shares.length,
@@ -63,17 +75,30 @@ contract SlashingManager is Initializable, OwnableUpgradeable, ReentrancyGuardUp
             totalShares += shares[i];
         }
 
-        require(totalShares > 0, "SlashingManager.freezeOperatorStakingShares: No shares to distribute slashShare");
+        require(
+            totalShares > 0,
+            "SlashingManager.freezeOperatorStakingShares: No shares to distribute slashShare"
+        );
 
         for (uint256 i = 0; i < stakers.length; i++) {
             if (shares[i] > 0) {
-                uint256 stakerSlashedShare = (slashShare * shares[i] * SCALE) / totalShares / SCALE;
+                uint256 stakerSlashedShare = (slashShare * shares[i] * SCALE) /
+                    totalShares /
+                    SCALE;
 
                 slashingStakerShares[stakers[i]] += stakerSlashedShare;
 
-                delegationManager.slashingStakingShares(operator, stakers[i], stakerSlashedShare);
+                delegationManager.slashingStakingShares(
+                    operator,
+                    stakers[i],
+                    stakerSlashedShare
+                );
 
-                emit SlashedShareDistributed(operator, stakers[i], stakerSlashedShare);
+                emit SlashedShareDistributed(
+                    operator,
+                    stakers[i],
+                    stakerSlashedShare
+                );
             }
         }
 
@@ -81,7 +106,9 @@ contract SlashingManager is Initializable, OwnableUpgradeable, ReentrancyGuardUp
         return slashShare;
     }
 
-    function updateSlashingRecipient(address _slashingRecipient) external onlySlasher {
+    function updateSlashingRecipient(
+        address _slashingRecipient
+    ) external onlySlasher {
         slashingRecipient = _slashingRecipient;
     }
 
@@ -97,7 +124,9 @@ contract SlashingManager is Initializable, OwnableUpgradeable, ReentrancyGuardUp
 
         emit Withdrawal(amountToSend, slashingRecipient, msg.sender);
 
-        (bool success,) = payable(slashingRecipient).call{value: amountToSend}("");
+        (bool success, ) = payable(slashingRecipient).call{value: amountToSend}(
+            ""
+        );
 
         require(success, "FeeVault: SlashingManager to send ETH to recipient");
     }

@@ -7,14 +7,19 @@ import "../../interfaces/ISlashingManager.sol";
 
 abstract contract DelegationManagerStorage is IDelegationManager {
     bytes32 public constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
+        keccak256(
+            "EIP712Domain(string name,uint256 chainId,address verifyingContract)"
+        );
 
     bytes32 public constant STAKER_DELEGATION_TYPEHASH =
-        keccak256("StakerDelegation(address staker,address operator,uint256 nonce,uint256 expiry)");
+        keccak256(
+            "StakerDelegation(address staker,address operator,uint256 nonce,uint256 expiry)"
+        );
 
-    bytes32 public constant DELEGATION_APPROVAL_TYPEHASH = keccak256(
-        "DelegationApproval(address staker,address operator,address delegationApprover,bytes32 salt,uint256 expiry)"
-    );
+    bytes32 public constant DELEGATION_APPROVAL_TYPEHASH =
+        keccak256(
+            "DelegationApproval(address staker,address operator,address delegationApprover,bytes32 salt,uint256 expiry)"
+        );
 
     bytes32 internal _DOMAIN_SEPARATOR;
 
@@ -32,7 +37,8 @@ abstract contract DelegationManagerStorage is IDelegationManager {
 
     mapping(address => uint256) public operatorShares;
 
-    mapping(address => mapping(address => uint256)) public stakerDelegateSharesToOperator;
+    mapping(address => mapping(address => uint256))
+        public stakerDelegateSharesToOperator;
 
     mapping(address => OperatorDetails) internal _operatorDetails;
 
@@ -40,11 +46,14 @@ abstract contract DelegationManagerStorage is IDelegationManager {
 
     mapping(address => uint256) public stakerNonce;
 
-    mapping(address => mapping(bytes32 => bool)) public delegationApproverSaltIsSpent;
+    mapping(address => mapping(bytes32 => bool))
+        public delegationApproverSaltIsSpent;
 
     mapping(bytes32 => bool) public pendingWithdrawals;
 
     mapping(address => uint256) public cumulativeWithdrawalsQueued;
+
+    mapping(address => address[]) public operatorDelegatedStakers;
 
     function _initializeDelegationManagerStorage(
         IFdChainDepositManager _fdChainDepositManager,

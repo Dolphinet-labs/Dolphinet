@@ -6,6 +6,7 @@ import "@/access/Pausable.sol";
 
 import "./RewardManagerStorage.sol";
 import "../../interfaces/IFdChainBase.sol";
+import "../../interfaces/IDelegationManager.sol";
 import "../../interfaces/IFdChainDepositManager.sol";
 
 contract RewardManager is RewardManagerStorage, Pausable {
@@ -14,12 +15,18 @@ contract RewardManager is RewardManagerStorage, Pausable {
     uint256 public constant SCALE = 1e18;
 
     modifier onlyRewardManager() {
-        require(msg.sender == address(rewardManager), "RewardManager.only reward manager can call this function");
+        require(
+            msg.sender == address(rewardManager),
+            "RewardManager.only reward manager can call this function"
+        );
         _;
     }
 
     modifier onlyPayFeeManager() {
-        require(msg.sender == address(payFeeManager), "RewardManager.only pay fee manager can call this function");
+        require(
+            msg.sender == address(payFeeManager),
+            "RewardManager.only pay fee manager can call this function"
+        );
         _;
     }
 
@@ -43,23 +50,31 @@ contract RewardManager is RewardManagerStorage, Pausable {
         rewardManager = _rewardManager;
         stakePercent = _stakePercent;
         _initializePauser(_pauserRegistry, UNPAUSE_ALL);
-        _initializeRewardManagerStorage(_delegationManager, _fdChainDepositManager);
+        _initializeRewardManagerStorage(
+            _delegationManager,
+            _fdChainDepositManager
+        );
     }
 
-    function payFee(address chainBase, address operator, uint256 baseFee) external onlyPayFeeManager {
+    function payFee(
+        address chainBase,
+        address operator,
+        uint256 baseFee
+    ) external onlyPayFeeManager {
         uint256 totalShares = IFdChainBase(chainBase).totalShares();
 
-        uint256 operatorShares = delegationManager.operatorShares(operator);
+        uint256 operatorShares = delegationManager.getOperatorShares(operator);
 
         require(
-            totalShares > 0 && operatorShares > 0, "RewardManager payFee: one of totalShares and operatorShares is zero"
+            totalShares > 0 && operatorShares > 0,
+            "RewardManager payFee: one of totalShares and operatorShares is zero"
         );
 
         uint256 operatorTotalFee = (baseFee * operatorShares) / totalShares;
 
         uint256 stakeFee = (operatorTotalFee * stakePercent) / 100;
 
-        _updateStakerReward(chainBase, stakeFee, totalShares);
+        _updateStakerReward(chainBase, stakeFee, totalShares, operator);
 
         uint256 operatorFee = operatorTotalFee - stakeFee;
 
@@ -70,22 +85,29 @@ contract RewardManager is RewardManagerStorage, Pausable {
 
     function operatorClaimReward() external returns (bool) {
         uint256 claimAmount = operatorRewards[msg.sender];
-        require(claimAmount > 0, "RewardManager operatorClaimReward: operator claim amount need more then zero");
         require(
-            address(this).balance >= claimAmount, "RewardManager operatorClaimReward: Reward Token balance insufficient"
+            claimAmount > 0,
+            "RewardManager operatorClaimReward: operator claim amount need more then zero"
+        );
+        require(
+            address(this).balance >= claimAmount,
+            "RewardManager operatorClaimReward: Reward Token balance insufficient"
         );
         operatorRewards[msg.sender] = 0;
 
         emit OperatorClaimReward(msg.sender, claimAmount);
 
-        (bool success,) = payable(msg.sender).call{value: claimAmount}("");
+        (bool success, ) = payable(msg.sender).call{value: claimAmount}("");
 
         return success;
     }
 
     function stakeHolderClaimReward(address chainBase) external returns (bool) {
         uint256 stakeHolderAmount = _stakeHolderAmount(msg.sender, chainBase);
-        require(stakeHolderAmount > 0, "RewardManager operatorClaimReward: stake holder amount need more then zero");
+        require(
+            stakeHolderAmount > 0,
+            "RewardManager operatorClaimReward: stake holder amount need more then zero"
+        );
         require(
             address(this).balance >= stakeHolderAmount,
             "RewardManager operatorClaimReward: Reward Token balance insufficient"
@@ -95,37 +117,67 @@ contract RewardManager is RewardManagerStorage, Pausable {
 
         emit StakeHolderClaimReward(msg.sender, chainBase, stakeHolderAmount);
 
-        (bool success,) = payable(msg.sender).call{value: stakeHolderAmount}("");
+        (bool success, ) = payable(msg.sender).call{value: stakeHolderAmount}(
+            ""
+        );
 
         require(success, "RewardManager operatorClaimReward: transfer fail");
 
         return success;
     }
 
-    function getStakeHolderAmount(address chainBase) external view returns (uint256) {
+    function getStakeHolderAmount(
+        address chainBase
+    ) external view returns (uint256) {
         return _stakeHolderAmount(msg.sender, chainBase);
     }
 
-    function _updateStakerReward(address chainBase, uint256 stakeFee, uint256 totalShares) internal {
-        uint256 length = IFdChainBase(chainBase).stakerListLength();
+    ////////////////////////////////////////////////
+    function _updateStakerReward(
+        address chainBase,
+        uint256 stakeFee,
+        uint256 totalShares,
+        address operator
+    ) internal {
+        address[] memory stakers = IDelegationManager(delegationManager)
+            .getOperatorDelegatedStakers(operator);
+
+        uint256 length = stakers.length;
 
         for (uint256 i = 0; i < length; i++) {
-            address staker = IFdChainBase(chainBase).stakerListFind(i);
-            uint256 shares = fdChainDepositManager.getDeposits(IFdChainBase(chainBase).stakerListFind(i));
-            stakerRewards[chainBase][staker] += (shares * stakeFee * SCALE) / totalShares / SCALE;
+            address staker = stakers[i];
+            uint256 shares = fdChainDepositManager.getDeposits(staker);
+            stakerRewards[chainBase][staker] +=
+                (shares * stakeFee * SCALE) /
+                totalShares /
+                SCALE;
         }
     }
 
-    function _stakeHolderAmount(address staker, address chainBase) internal view returns (uint256) {
+    function _stakeHolderAmount(
+        address staker,
+        address chainBase
+    ) internal view returns (uint256) {
         return stakerRewards[chainBase][staker];
     }
 
-    function _removeStakeHolderAmount(address staker, address chainBase, uint256 stakerAmount) internal {
-        stakerRewards[chainBase][staker] = stakerRewards[chainBase][staker] - stakerAmount;
+    function _removeStakeHolderAmount(
+        address staker,
+        address chainBase,
+        uint256 stakerAmount
+    ) internal {
+        stakerRewards[chainBase][staker] =
+            stakerRewards[chainBase][staker] -
+            stakerAmount;
     }
 
-    function updateStakePercent(uint256 _stakePercent) external onlyRewardManager {
-        require(_stakePercent > 0, "RewardManager updateStakePercent: _stakePercent need more then zero");
+    function updateStakePercent(
+        uint256 _stakePercent
+    ) external onlyRewardManager {
+        require(
+            _stakePercent > 0,
+            "RewardManager updateStakePercent: _stakePercent need more then zero"
+        );
         stakePercent = _stakePercent;
     }
 }
