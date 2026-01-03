@@ -8,9 +8,11 @@ import "@openzeppelin-upgrades/contracts/utils/ReentrancyGuardUpgradeable.sol";
 
 import "@/libraries/EIP1271SignatureUtils.sol";
 import "@/access/interfaces/IPauserRegistry.sol";
+import "../../interfaces/IGovernance.sol";
 import "@/access/Pausable.sol";
 
 import "./DelegationManagerStorage.sol";
+import "./Governance.sol";
 
 contract DelegationManager is
     Initializable,
@@ -55,7 +57,8 @@ contract DelegationManager is
         uint256 _withdrawalDelayBlock,
         IFdChainDepositManager _fdChainDepositManager,
         IFdChainBase _fdChainBase,
-        ISlashingManager _slashingManager
+        ISlashingManager _slashingManager,
+        IGovernance _governance
     ) external initializer {
         _initializePauser(_pauserRegistry, initialPausedStatus);
         _DOMAIN_SEPARATOR = _calculateDomainSeparator();
@@ -64,7 +67,8 @@ contract DelegationManager is
         _initializeDelegationManagerStorage(
             _fdChainDepositManager,
             _fdChainBase,
-            _slashingManager
+            _slashingManager,
+            _governance
         );
 
         ORIGINAL_CHAIN_ID = block.chainid;
@@ -93,7 +97,7 @@ contract DelegationManager is
     function unRegisterAsOperator() external {
         require(
             isOperator(msg.sender),
-            "DelegationManager.unregisterAsOperator: caller must be an operator"
+            "DelegationManager.unregisterAsOperator: caller must be an operator "
         );
         require(
             operatorShares[msg.sender] == 0,
@@ -112,7 +116,33 @@ contract DelegationManager is
             delegatedTo[staker] = address(0);
         }
         delete operatorDelegatedStakers[msg.sender];
+
+        governance.removeCandidate(msg.sender);
         emit OperatorUnregistered(msg.sender);
+    }
+
+    function unRegisterFromGovernance(address op) external {
+        require(
+            isOperator(op),
+            "DelegationManager.unRegisterFromGovernance: op must be an operator "
+        );
+        // require(
+        //     operatorShares[op] == 0,
+        //     "DelegationManager.unregisterAsOperator: operator cannot have shares delegated"
+        // );
+        delete _operatorDetails[op];
+
+        address[] storage delegatedStakers = operatorDelegatedStakers[op];
+
+        for (uint256 i = 0; i < delegatedStakers.length; i++) {
+            address staker = delegatedStakers[i];
+
+            _undelegate(staker);
+            delegatedTo[staker] = address(0);
+        }
+        delete operatorDelegatedStakers[op];
+
+        emit OperatorUnregisteredByGovernance(op);
     }
 
     function modifyOperatorDetails(

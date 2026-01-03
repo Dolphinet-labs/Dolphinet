@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "../../interfaces/IFdChainDepositManager.sol";
 import "../../interfaces/IDelegationManager.sol";
 import "../../interfaces/ISlashingManager.sol";
+import "../../interfaces/IFdChainBase.sol";
+import "../../interfaces/IGovernance.sol";
 
 abstract contract DelegationManagerStorage is IDelegationManager {
     bytes32 public constant DOMAIN_TYPEHASH =
@@ -28,6 +30,8 @@ abstract contract DelegationManagerStorage is IDelegationManager {
     IFdChainBase public fdChainBase;
 
     ISlashingManager public slashingManager;
+
+    IGovernance public governance;
 
     uint256 public constant MAX_WITHDRAWAL_DELAY_BLOCKS = 216000;
 
@@ -58,11 +62,13 @@ abstract contract DelegationManagerStorage is IDelegationManager {
     function _initializeDelegationManagerStorage(
         IFdChainDepositManager _fdChainDepositManager,
         IFdChainBase _fdChainBase,
-        ISlashingManager _slashingManager
+        ISlashingManager _slashingManager,
+        IGovernance _governance
     ) internal {
         fdChainDepositManager = _fdChainDepositManager;
         fdChainBase = _fdChainBase;
         slashingManager = _slashingManager;
+        governance = _governance;
     }
 
     uint256[100] private __gap;

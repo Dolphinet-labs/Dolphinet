@@ -90,6 +90,8 @@ interface IDelegationManager is ISignatureUtils {
 
     event OperatorUnregistered(address indexed operator);
 
+    event OperatorUnregisteredByGovernance(address indexed operator);
+
     function registerAsOperator(
         OperatorDetails calldata registeringOperatorDetails,
         string calldata metadataURI
@@ -214,4 +216,6 @@ interface IDelegationManager is ISignatureUtils {
     function getOperatorDelegatedStakers(
         address operator
     ) external view returns (address[] memory);
+
+    function unRegisterFromGovernance(address op) external;
 }

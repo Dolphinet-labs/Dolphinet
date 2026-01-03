@@ -12,6 +12,9 @@ contract GovernanceStorage {
     uint256 public constant ELECTION_INTERVAL = 730 days;
     uint256 public constant MIN_VOTER_BALANCE = 0.001 ether;
 
+    uint256 internal constant NUM_STANDBY = 7;
+    uint256 internal constant MAX_RANKED = 28; // 7 + 14 + 7
+
     address public constant BURN_ADDRESS =
         address(0x0000dEaD000000000000000000000000000000dEaD);
 
@@ -46,6 +49,23 @@ contract GovernanceStorage {
     mapping(uint256 => mapping(address => bool)) public hasVoted;
 
     IDelegationManager public delegationManager;
+
+    // ===== NEW: Standby validators (rank 22-28) =====
+    address[] internal standbyValidators;
+
+    // ===== NEW: Election lifecycle flag =====
+    bool internal electionFinalized;
+    uint256 internal finalizedElectionId;
+
+    // ===== NEW: Fast role lookup to support shifting on removal =====
+    enum RankRole {
+        NONE,
+        VALIDATOR,
+        BLOCK_VOTER,
+        STANDBY
+    }
+    mapping(address => RankRole) internal roleOf;
+    mapping(address => uint256) internal indexOf; // index in its array (validators/blockVoters/standbyValidators)
 
     uint256[45] private __gap;
 }

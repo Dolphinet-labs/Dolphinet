@@ -42,6 +42,17 @@ interface IGovernance {
         uint256 remainingStake
     );
 
+    event StandbyValidatorsSelected(
+        uint256 indexed electionId,
+        address[] standby
+    );
+    event SupplementBlockVoters(uint256 indexed electionId, address[] added);
+    event ForceUnregisterFailed(
+        uint256 indexed electionId,
+        address indexed operator
+    );
+    event ElectionFinalizedFlag(uint256 indexed electionId);
+
     // ========= ADMIN =========
 
     /// @notice Set governance manager address
@@ -78,4 +89,6 @@ interface IGovernance {
     /// @param validator address to slash
     /// @param permille penalty in ‰ (permille)
     function slash(address validator, uint256 permille) external;
+
+    function removeCandidate(address op) external;
 }
