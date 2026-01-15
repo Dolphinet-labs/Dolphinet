@@ -19,6 +19,7 @@ import (
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/metrics"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/node/safedb"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/p2p"
+	"github.com/dolphinnet-labs/dolphinnet/dn-node/pos"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup/driver"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup/event"
@@ -75,6 +76,10 @@ type OpNode struct {
 	beacon *sources.L1BeaconClient
 
 	interopSys interop.SubSystem
+
+	// PoS Manager client
+	managerClient *pos.ManagerClient
+	posEmitter    event.Emitter // emitter for triggering SequencerActionEvent
 
 	// some resources cannot be stopped directly, like the p2p gossipsub router (not our design),
 	// and depend on this ctx to be closed.
@@ -160,6 +165,9 @@ func (n *OpNode) init(ctx context.Context, cfg *Config) error {
 	if err := n.initPProf(cfg); err != nil {
 		return fmt.Errorf("failed to init profiling: %w", err)
 	}
+	if err := n.initManagerClient(ctx, cfg); err != nil {
+		return fmt.Errorf("failed to init manager client: %w", err)
+	}
 	return nil
 }
 
@@ -242,6 +250,11 @@ func (n *OpNode) initL2(ctx context.Context, cfg *Config) error {
 	}
 
 	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.elClient, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, managedMode, cfg.Driver.MaxRequestsPerBatch)
+
+	if cfg.ManagerURL != "" {
+		n.posEmitter = n.eventSys.Register("pos-manager", nil, event.DefaultRegisterOpts())
+	}
+
 	return nil
 }
 
@@ -350,6 +363,65 @@ func (n *OpNode) initP2PSigner(ctx context.Context, cfg *Config) (err error) {
 	return
 }
 
+func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
+	if cfg.ManagerURL == "" {
+		n.log.Info("PoS manager not configured, using default sequencer mode")
+		return nil
+	}
+
+	n.log.Info("Initializing PoS manager client",
+		"manager_url", cfg.ManagerURL,
+		"validator_address", cfg.P2PSignerAddress.Hex())
+
+	// Use P2PSignerAddress as validator address
+	client := pos.NewManagerClient(cfg.ManagerURL, cfg.P2PSignerAddress, n.log)
+
+	// Set block assignment callback
+	// Manager only sends to validators that should produce blocks based on scheduler, so receiving a message means we should produce a block
+	// After block production, it will automatically broadcast to other validator nodes via P2P (implemented in PublishL2Payload)
+	// Other validators receive P2P messages via OnUnsafeL2Payload to complete synchronization
+	client.SetOnBlockAssignment(func(assignment pos.BlockAssignment) error {
+		n.log.Info("Received block assignment from manager",
+			"block_number", assignment.BlockNumber,
+			"epoch", assignment.Epoch,
+			"validator", assignment.Validator.Hex())
+
+		// Notify manager that block production has started
+		if err := client.SendValidatorStatus(assignment.BlockNumber, "mining"); err != nil {
+			n.log.Warn("Failed to send validator status", "err", err)
+		}
+
+		// Trigger sequencer to produce block
+		// After block production, sequencer will automatically trigger PublishL2Payload via asyncGossip for P2P broadcast
+		if n.posEmitter != nil {
+			n.posEmitter.Emit(sequencing.SequencerActionEvent{})
+		}
+
+		return nil
+	})
+
+	// Set heartbeat callback to detect if manager is alive
+	client.SetOnHeartbeat(func(heartbeat pos.HeartbeatMessage) error {
+		n.log.Debug("Received heartbeat from manager",
+			"block_number", heartbeat.BlockNumber,
+			"epoch", heartbeat.Epoch)
+		return nil
+	})
+
+	// Set epoch schedule callback
+	client.SetOnEpochSchedule(func(schedule pos.EpochSchedule) error {
+		n.log.Info("Received epoch schedule from manager",
+			"epoch", schedule.Epoch,
+			"start_block", schedule.StartBlock,
+			"end_block", schedule.EndBlock)
+		return nil
+	})
+
+	n.managerClient = client
+
+	return nil
+}
+
 func (n *OpNode) Start(ctx context.Context) error {
 	if n.interopSys != nil {
 		if err := n.interopSys.Start(ctx); err != nil {
@@ -357,6 +429,16 @@ func (n *OpNode) Start(ctx context.Context) error {
 			return err
 		}
 	}
+
+	// Start manager client (if configured)
+	if n.managerClient != nil {
+		if err := n.managerClient.Start(ctx); err != nil {
+			n.log.Error("Could not start manager client", "err", err)
+			return err
+		}
+		n.log.Info("Manager client started")
+	}
+
 	n.log.Info("Starting execution engine driver")
 	// start driving engine: sync blocks by deriving them from L1 and driving them into the engine
 	if err := n.l2Driver.Start(); err != nil {
@@ -422,12 +504,22 @@ func (n *OpNode) OnNewL1Finalized(ctx context.Context, sig eth.L1BlockRef) {
 func (n *OpNode) PublishL2Payload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope) error {
 	n.tracer.OnPublishL2Payload(ctx, envelope)
 
-	// publish to p2p, if we are running p2p at all
+	// After block production, broadcast to other validator nodes via P2P
+	// Other validators receive and synchronize blocks via OnUnsafeL2Payload
 	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil {
 		if n.p2pSigner == nil {
 			return fmt.Errorf("node has no p2p signer, payload %s cannot be published", envelope.ID())
 		}
 		n.log.Info("Publishing signed execution payload on p2p", "id", envelope.ID())
+
+		// Notify manager that block production is complete
+		if n.managerClient != nil {
+			blockNumber := uint64(envelope.ExecutionPayload.BlockNumber)
+			if err := n.managerClient.SendValidatorStatus(blockNumber, "done"); err != nil {
+				n.log.Warn("Failed to send done status to manager", "err", err)
+			}
+		}
+
 		return p2pNode.GossipOut().SignAndPublishL2Payload(ctx, envelope, n.p2pSigner)
 	}
 	// if p2p is not enabled then we just don't publish the payload
@@ -559,6 +651,11 @@ func (n *OpNode) Stop(ctx context.Context) error {
 		if err := n.interopSys.Stop(ctx); err != nil {
 			result = multierror.Append(result, fmt.Errorf("failed to close interop sub-system: %w", err))
 		}
+	}
+
+	// close manager client
+	if n.managerClient != nil {
+		n.managerClient.Stop()
 	}
 
 	if n.eventSys != nil {

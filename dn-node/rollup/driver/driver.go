@@ -218,7 +218,7 @@ func NewDriver(
 		asyncGossiper := async.NewAsyncGossiper(driverCtx, network, log, metrics)
 		attrBuilder := derive.NewFetchingAttributesBuilder(cfg, l2)
 		sequencer = sequencing.NewSequencer(driverCtx, log, cfg, attrBuilder,
-			sequencerStateListener, asyncGossiper, metrics)
+			sequencerStateListener, asyncGossiper, metrics, driverCfg.PosMode)
 		sys.Register("sequencer", sequencer, opts)
 	} else {
 		sequencer = sequencing.DisabledSequencer{}

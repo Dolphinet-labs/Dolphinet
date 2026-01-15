@@ -385,6 +385,19 @@ var (
 		Category: RollupCategory,
 		Hidden:   true,
 	}
+	ManagerURLFlag = &cli.StringFlag{
+		Name:     "pos.manager-url",
+		Usage:    "WebSocket URL of the dolphinet-manager for PoS block scheduling",
+		EnvVars:  prefixEnvVars("POS_MANAGER_URL"),
+		Category: SequencerCategory,
+	}
+	PosModeEnabledFlag = &cli.BoolFlag{
+		Name:     "pos.enabled",
+		Usage:    "Enable the pos service",
+		EnvVars:  prefixEnvVars("POS_ENABLED"),
+		Value:    false,
+		Category: SequencerCategory,
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -430,6 +443,8 @@ var optionalFlags = []cli.Flag{
 	InteropRPCPort,
 	InteropJWTSecret,
 	IgnoreMissingPectraBlobSchedule,
+	ManagerURLFlag,
+	PosModeEnabledFlag,
 }
 
 var DeprecatedFlags = []cli.Flag{

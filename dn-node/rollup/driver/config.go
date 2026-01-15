@@ -25,6 +25,11 @@ type Config struct {
 	// to be compatible with verifiers forcefully generating the same block while catching up the sequencing window timeout.
 	RecoverMode bool `json:"recover_mode"`
 
+	// PosMode indicates if the sequencer is in Proof-of-Stake mode.
+	// In PoS mode, the sequencer should not automatically produce blocks,
+	// but only produce blocks when instructed by the manager.
+	PosMode bool `json:"pos_mode"`
+
 	// Maximum number of requests to make per batch
 	MaxRequestsPerBatch int `json:"max_requests_per_batch"`
 }

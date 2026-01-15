@@ -110,6 +110,8 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*node.Config, error) {
 
 		IgnoreMissingPectraBlobSchedule: ctx.Bool(flags.IgnoreMissingPectraBlobSchedule.Name),
 		FetchWithdrawalRootFromState:    ctx.Bool(flags.FetchWithdrawalRootFromState.Name),
+
+		ManagerURL: ctx.String(flags.ManagerURLFlag.Name),
 	}
 
 	if err := cfg.LoadPersisted(log); err != nil {
@@ -175,6 +177,7 @@ func NewDriverConfig(ctx *cli.Context) *driver.Config {
 		SequencerStopped:    ctx.Bool(flags.SequencerStoppedFlag.Name),
 		SequencerMaxSafeLag: ctx.Uint64(flags.SequencerMaxSafeLagFlag.Name),
 		RecoverMode:         ctx.Bool(flags.SequencerRecoverMode.Name),
+		PosMode:             ctx.Bool(flags.PosModeEnabledFlag.Name),
 	}
 }
 

@@ -46,6 +46,6 @@ abstract contract FeeVault {
 
         (bool success,) = payable(RECIPIENT).call{value: value}("");
 
-        require(success, "FeeVault: failed to send TW to fee recipient");
+        require(success, "FeeVault: failed to send DN to fee recipient");
     }
 }

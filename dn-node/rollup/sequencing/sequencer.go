@@ -86,6 +86,7 @@ type Sequencer struct {
 	maxSafeLag atomic.Uint64
 
 	recoverMode atomic.Bool
+	posMode     atomic.Bool
 
 	// active identifies whether the sequencer is running.
 	// This is an atomic value, so it can be read without locking the whole sequencer.
@@ -128,8 +129,9 @@ func NewSequencer(driverCtx context.Context, log log.Logger, rollupCfg *rollup.C
 	listener SequencerStateListener,
 	asyncGossip AsyncGossiper,
 	metrics Metrics,
+	posMode bool,
 ) *Sequencer {
-	return &Sequencer{
+	seq := &Sequencer{
 		ctx:         driverCtx,
 		log:         log,
 		rollupCfg:   rollupCfg,
@@ -141,6 +143,8 @@ func NewSequencer(driverCtx context.Context, log log.Logger, rollupCfg *rollup.C
 		timeNow:     time.Now,
 		toBlockRef:  derive.PayloadToBlockRef,
 	}
+	seq.posMode.Store(posMode)
+	return seq
 }
 
 func (d *Sequencer) AttachEmitter(em event.Emitter) {
@@ -419,7 +423,10 @@ func (d *Sequencer) onForkchoiceUpdate(x engine.ForkchoiceUpdateEvent) {
 		// The cleared state will block further BuildStarted/BuildSealed responses from continuing the stale build job.
 		d.latest = BuildingState{}
 	}
-	if x.UnsafeL2Head.Number > d.latestHead.Number {
+	if d.posMode.Load() {
+		d.nextActionOK = false
+		d.log.Debug("PoS mode active, sequencer not automatically scheduling next block")
+	} else if x.UnsafeL2Head.Number > d.latestHead.Number {
 		d.nextActionOK = true
 		now := d.timeNow()
 		blockTime := time.Duration(d.rollupCfg.BlockTime) * time.Second
