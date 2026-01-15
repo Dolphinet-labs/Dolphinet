@@ -547,7 +547,7 @@ abstract contract DolphinetGovernance is
 
     // ================= VIEW HELPERS =================
 
-    function getValidators() external view returns (address[] memory) {
+    function getValidators() public view returns (address[] memory) {
         return validators;
     }
 
@@ -578,5 +578,20 @@ abstract contract DolphinetGovernance is
             all[validators.length + j] = blockVoters[j];
         }
         return all;
+    }
+
+    function getValidatorsShares()
+        external
+        view
+        returns (address[] memory, uint256[] memory)
+    {
+        uint256 len = validators.length;
+        uint256[] memory shares = new uint256[](len);
+        address[] memory validators = getValidators();
+
+        for (uint256 i = 0; i < len; i++) {
+            shares[i] = delegationManager.getOperatorShares(validators[i]);
+        }
+        return (validators, shares);
     }
 }

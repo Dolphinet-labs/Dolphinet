@@ -5,7 +5,7 @@ import "@openzeppelin-upgrades/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelin-upgrades/contracts/access/OwnableUpgradeable.sol";
 import "@openzeppelin-upgrades/contracts/utils/ReentrancyGuardUpgradeable.sol";
 
-import "./FdChainDepositManagerStorage.sol";
+import "./ChainDepositManagerStorage.sol";
 import "../../libraries/EIP1271SignatureUtils.sol";
 import "@/access/Pausable.sol";
 
