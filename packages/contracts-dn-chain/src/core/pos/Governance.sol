@@ -29,7 +29,7 @@ import "../../interfaces/IGovernance.sol";
  *  - Vote power = 1 per address (can be enhanced later)
  */
 
-abstract contract DolphinetGovernance is
+contract DolphinetGovernance is
     Initializable,
     OwnableUpgradeable,
     GovernanceStorage,

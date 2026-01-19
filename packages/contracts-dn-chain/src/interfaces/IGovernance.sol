@@ -83,12 +83,5 @@ interface IGovernance {
     /// @notice Get Block Voters Committee (Top 21)
     function getBlockVoters() external view returns (address[] memory);
 
-    // ========= SLASHING (MANAGER ONLY) =========
-
-    /// @notice Slash validator / committee member
-    /// @param validator address to slash
-    /// @param permille penalty in ‰ (permille)
-    function slash(address validator, uint256 permille) external;
-
     function removeCandidate(address op) external;
 }
