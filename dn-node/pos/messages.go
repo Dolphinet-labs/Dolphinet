@@ -64,7 +64,7 @@ type EpochSchedule struct {
 	StartBlock  uint64                    `json:"start_block"`
 	EndBlock    uint64                    `json:"end_block"`
 	Assignments []BlockAssignment         `json:"assignments"`
-	Validators  map[common.Address]uint64 `json:"validators"` // validator address -> number of assigned blocks
+	Validators  map[common.Address]uint64 `json:"validators"`
 	CreatedAt   time.Time                 `json:"created_at"`
 }
 

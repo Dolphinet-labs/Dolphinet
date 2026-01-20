@@ -59,6 +59,10 @@ type GossipSetupConfigurables interface {
 
 type GossipRuntimeConfig interface {
 	P2PSequencerAddress() common.Address
+	// P2PAllowedSequencerAddresses returns a list of all allowed sequencer addresses.
+	// In PoS mode, this should include all validator addresses that can produce blocks.
+	// If the list is empty, falls back to P2PSequencerAddress() for backward compatibility.
+	P2PAllowedSequencerAddresses() []common.Address
 }
 
 //go:generate mockery --name GossipMetricer
@@ -363,23 +367,40 @@ func BuildBlocksValidator(log log.Logger, cfg *rollup.Config, runCfg GossipRunti
 }
 
 func verifyBlockSignature(log log.Logger, cfg *rollup.Config, runCfg GossipRuntimeConfig, id peer.ID, signature eth.Bytes65, payloadBytes []byte) pubsub.ValidationResult {
-	authCtx := &opsigner.OPStackP2PBlockAuthV1{
-		Allowed: runCfg.P2PSequencerAddress(),
-		Chain:   eth.ChainIDFromBig(cfg.L2ChainID),
+	// Get list of allowed sequencer addresses
+	allowedAddrs := runCfg.P2PAllowedSequencerAddresses()
+	
+	// Fallback to single address for backward compatibility
+	if len(allowedAddrs) == 0 {
+		singleAddr := runCfg.P2PSequencerAddress()
+		if singleAddr == (common.Address{}) {
+			log.Warn("no configured p2p sequencer address, ignoring gossiped block", "peer", id)
+			return pubsub.ValidationIgnore
+		}
+		allowedAddrs = []common.Address{singleAddr}
 	}
-	if authCtx.Allowed == (common.Address{}) {
-		log.Warn("no configured p2p sequencer address, ignoring gossiped block", "peer", id, "addr", authCtx.Allowed)
-		return pubsub.ValidationIgnore
-	}
+
+	// Try to verify signature against each allowed address
 	block := opsigner.SignedP2PBlock{
 		Raw:       payloadBytes,
 		Signature: signature,
 	}
-	if err := block.VerifySignature(authCtx); err != nil {
-		log.Warn("invalid block signature", "err", err, "peer", id)
-		return pubsub.ValidationReject
+	
+	chainID := eth.ChainIDFromBig(cfg.L2ChainID)
+	for _, addr := range allowedAddrs {
+		authCtx := &opsigner.OPStackP2PBlockAuthV1{
+			Allowed: addr,
+			Chain:   chainID,
+		}
+		if err := block.VerifySignature(authCtx); err == nil {
+			// Signature is valid for this address
+			return pubsub.ValidationAccept
+		}
 	}
-	return pubsub.ValidationAccept
+	
+	// None of the allowed addresses matched
+	log.Warn("invalid block signature, not from any allowed sequencer address", "peer", id, "allowed_count", len(allowedAddrs))
+	return pubsub.ValidationReject
 }
 
 type GossipIn interface {

@@ -58,6 +58,9 @@ type RuntimeConfig struct {
 // runtimeConfigData is a flat bundle of configurable data, easy and light to copy around.
 type runtimeConfigData struct {
 	p2pBlockSignerAddr common.Address
+	// p2pAllowedSequencerAddrs is a list of all allowed sequencer addresses for PoS mode.
+	// In PoS mode, multiple validators can produce blocks, so we need to accept blocks from all of them.
+	p2pAllowedSequencerAddrs []common.Address
 
 	// superchain protocol version signals
 	recommended params.ProtocolVersion
@@ -77,6 +80,22 @@ func (r *RuntimeConfig) P2PSequencerAddress() common.Address {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.p2pBlockSignerAddr
+}
+
+func (r *RuntimeConfig) P2PAllowedSequencerAddresses() []common.Address {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// Return a copy to prevent external modifications
+	if len(r.p2pAllowedSequencerAddrs) == 0 {
+		// Fallback to single address for backward compatibility
+		if r.p2pBlockSignerAddr != (common.Address{}) {
+			return []common.Address{r.p2pBlockSignerAddr}
+		}
+		return nil
+	}
+	result := make([]common.Address, len(r.p2pAllowedSequencerAddrs))
+	copy(result, r.p2pAllowedSequencerAddrs)
+	return result
 }
 
 func (r *RuntimeConfig) RequiredProtocolVersion() params.ProtocolVersion {
@@ -102,4 +121,14 @@ func (r *RuntimeConfig) Load(ctx context.Context, p2pSignerAddress common.Addres
 	r.recommended = params.ProtocolVersion(common.HexToHash("0x1"))
 	r.log.Info("loaded new runtime config values!", "p2p_seq_address", r.p2pBlockSignerAddr)
 	return nil
+}
+
+// UpdateAllowedSequencerAddresses updates the list of allowed sequencer addresses.
+// This is called when receiving EpochSchedule from the manager, which contains all validator addresses.
+func (r *RuntimeConfig) UpdateAllowedSequencerAddresses(addresses []common.Address) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.p2pAllowedSequencerAddrs = make([]common.Address, len(addresses))
+	copy(r.p2pAllowedSequencerAddrs, addresses)
+	r.log.Info("updated allowed sequencer addresses", "count", len(addresses))
 }

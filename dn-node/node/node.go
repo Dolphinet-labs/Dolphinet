@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 
@@ -414,6 +415,19 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 			"epoch", schedule.Epoch,
 			"start_block", schedule.StartBlock,
 			"end_block", schedule.EndBlock)
+		
+		// Update allowed sequencer addresses from the epoch schedule
+		// The schedule contains all validator addresses that can produce blocks in this epoch
+		if len(schedule.Validators) > 0 {
+			validatorAddrs := make([]common.Address, 0, len(schedule.Validators))
+			for addr := range schedule.Validators {
+				validatorAddrs = append(validatorAddrs, addr)
+			}
+			n.runCfg.UpdateAllowedSequencerAddresses(validatorAddrs)
+			n.log.Info("Updated allowed sequencer addresses from epoch schedule",
+				"count", len(validatorAddrs))
+		}
+		
 		return nil
 	})
 
