@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"sync"
 	"time"
 
@@ -158,15 +157,6 @@ func (c *ManagerClient) connectLoop(ctx context.Context) {
 }
 
 func (c *ManagerClient) connect(ctx context.Context) error {
-	u, err := url.Parse(c.managerURL)
-	if err != nil {
-		return fmt.Errorf("invalid manager URL: %w", err)
-	}
-
-	if u.Scheme != "ws" && u.Scheme != "wss" {
-		return fmt.Errorf("unsupported scheme: %s, expected ws or wss", u.Scheme)
-	}
-
 	dialer := gorillaWS.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
