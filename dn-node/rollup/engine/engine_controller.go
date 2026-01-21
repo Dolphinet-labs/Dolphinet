@@ -246,6 +246,12 @@ func (e *EngineController) checkNewPayloadStatus(status eth.ExecutePayloadStatus
 		// Allow SYNCING and ACCEPTED if engine EL sync is enabled
 		return status == eth.ExecutionValid || status == eth.ExecutionSyncing || status == eth.ExecutionAccepted
 	}
+	// In CL sync mode, also allow ExecutionSyncing when parent blocks are missing
+	// The missing blocks will be requested via P2P, and we can retry processing the payload later
+	if status == eth.ExecutionSyncing {
+		e.log.Debug("Engine is syncing (missing parent blocks), will wait for blocks to arrive via P2P")
+		return true
+	}
 	return status == eth.ExecutionValid
 }
 
@@ -397,6 +403,19 @@ func (e *EngineController) InsertUnsafePayload(ctx context.Context, envelope *et
 			payload.ID(), payload.ParentID(), eth.NewPayloadErr(payload, status)))
 	}
 	newPayloadFinish := time.Now()
+
+	// If engine is syncing (missing parent blocks), don't update forkchoice yet
+	// Wait for missing blocks to arrive via P2P, then retry processing this payload
+	if status.Status == eth.ExecutionSyncing {
+		e.log.Debug("Engine is syncing (missing parent blocks), payload will be retried once blocks arrive",
+			"payload", envelope.ExecutionPayload.ID(),
+			"parent", envelope.ExecutionPayload.ParentID())
+		// Return a temporary error to indicate the payload needs to be retried later
+		// This prevents the payload from being marked as "successfully processed" in events.go
+		// The payload will remain in the queue and be retried once parent blocks arrive
+		return derive.NewTemporaryError(fmt.Errorf("engine is syncing (missing parent blocks), payload will be retried once blocks arrive: payload=%v, parent=%v",
+			envelope.ExecutionPayload.ID(), envelope.ExecutionPayload.ParentID()))
+	}
 
 	// Mark the new payload as valid
 	fc := eth.ForkchoiceState{

@@ -369,7 +369,7 @@ func BuildBlocksValidator(log log.Logger, cfg *rollup.Config, runCfg GossipRunti
 func verifyBlockSignature(log log.Logger, cfg *rollup.Config, runCfg GossipRuntimeConfig, id peer.ID, signature eth.Bytes65, payloadBytes []byte) pubsub.ValidationResult {
 	// Get list of allowed sequencer addresses
 	allowedAddrs := runCfg.P2PAllowedSequencerAddresses()
-	
+
 	// Fallback to single address for backward compatibility
 	if len(allowedAddrs) == 0 {
 		singleAddr := runCfg.P2PSequencerAddress()
@@ -385,7 +385,7 @@ func verifyBlockSignature(log log.Logger, cfg *rollup.Config, runCfg GossipRunti
 		Raw:       payloadBytes,
 		Signature: signature,
 	}
-	
+
 	chainID := eth.ChainIDFromBig(cfg.L2ChainID)
 	for _, addr := range allowedAddrs {
 		authCtx := &opsigner.OPStackP2PBlockAuthV1{
@@ -397,7 +397,7 @@ func verifyBlockSignature(log log.Logger, cfg *rollup.Config, runCfg GossipRunti
 			return pubsub.ValidationAccept
 		}
 	}
-	
+
 	// None of the allowed addresses matched
 	log.Warn("invalid block signature, not from any allowed sequencer address", "peer", id, "allowed_count", len(allowedAddrs))
 	return pubsub.ValidationReject

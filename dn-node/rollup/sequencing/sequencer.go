@@ -118,6 +118,10 @@ type Sequencer struct {
 
 	latestHeadSet chan struct{}
 
+	// pendingSequencerAction indicates that a sequencer action is waiting for forkchoice update
+	// This is used in PoS mode to ensure chain is synchronized before building blocks
+	pendingSequencerAction atomic.Bool
+
 	// toBlockRef converts a payload to a block-ref, and is only configurable for test-purposes
 	toBlockRef func(rollupCfg *rollup.Config, payload *eth.ExecutionPayload) (eth.L2BlockRef, error)
 }
@@ -352,6 +356,17 @@ func (d *Sequencer) onSequencerAction(SequencerActionEvent) {
 				Concluding:   true,
 			})
 		} else if d.latest == (BuildingState{}) {
+			// In PoS mode, before building a block, request a forkchoice update
+			// to ensure we have the latest chain state (including blocks from other validators)
+			// This prevents building on stale chain state and causing forks
+			if d.posMode.Load() {
+				d.log.Debug("PoS mode: requesting forkchoice update before building block to ensure chain is synchronized")
+				d.pendingSequencerAction.Store(true)
+				d.emitter.Emit(engine.ForkchoiceRequestEvent{})
+				// The forkchoice update will trigger onForkchoiceUpdate, which will check
+				// pendingSequencerAction and trigger the build if needed.
+				return
+			}
 			// If we have not started building anything, start building.
 			d.startBuildingBlock()
 		}
@@ -426,6 +441,13 @@ func (d *Sequencer) onForkchoiceUpdate(x engine.ForkchoiceUpdateEvent) {
 	if d.posMode.Load() {
 		d.nextActionOK = false
 		d.log.Debug("PoS mode active, sequencer not automatically scheduling next block")
+		// If there's a pending sequencer action and we're not building anything,
+		// trigger the build now that we have the latest forkchoice state
+		if d.pendingSequencerAction.Load() && d.latest == (BuildingState{}) {
+			d.log.Debug("PoS mode: forkchoice updated, triggering pending sequencer action")
+			d.pendingSequencerAction.Store(false)
+			d.startBuildingBlock()
+		}
 	} else if x.UnsafeL2Head.Number > d.latestHead.Number {
 		d.nextActionOK = true
 		now := d.timeNow()
@@ -622,8 +644,16 @@ func (d *Sequencer) forceStart() error {
 	}
 	// clear the building state; interrupting any existing sequencing job (there should never be one)
 	d.latest = BuildingState{}
-	d.nextActionOK = true
-	d.nextAction = d.timeNow()
+	// In PoS mode, sequencer should not automatically schedule blocks
+	// Blocks are only produced when manager sends block assignment via WebSocket
+	if d.posMode.Load() {
+		d.nextActionOK = false
+		d.log.Info("Sequencer has been started (PoS mode, waiting for manager block assignments)")
+	} else {
+		d.nextActionOK = true
+		d.nextAction = d.timeNow()
+		d.log.Info("Sequencer has been started", "next action", d.nextAction)
+	}
 	d.active.Store(true)
 	d.metrics.SetSequencerState(true)
 	d.log.Info("Sequencer has been started", "next action", d.nextAction)

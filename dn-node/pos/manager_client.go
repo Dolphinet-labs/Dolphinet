@@ -1,6 +1,7 @@
 package pos
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -230,6 +231,21 @@ func (c *ManagerClient) readPump(done chan struct{}) {
 				c.log.Error("WebSocket read error", "err", err)
 			}
 			break
+		}
+
+		messages := bytes.Split(message, []byte{'\n'})
+		for _, msg := range messages {
+			if len(msg) == 0 {
+				continue // Skip empty messages
+			}
+			if err := c.handleMessage(msg); err != nil {
+				// Log message preview (first 100 bytes) for debugging
+				previewLen := len(msg)
+				if previewLen > 100 {
+					previewLen = 100
+				}
+				c.log.Error("Failed to handle message", "err", err, "message_preview", string(msg[:previewLen]))
+			}
 		}
 
 		if err := c.handleMessage(message); err != nil {

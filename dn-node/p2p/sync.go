@@ -918,6 +918,17 @@ func (srv *ReqRespServer) handleSyncRequest(ctx context.Context, stream network.
 			return req, fmt.Errorf("failed to retrieve payload to serve to peer: %w", err)
 		}
 	}
+	if envelope == nil {
+		return req, fmt.Errorf("PayloadByNumber returned nil envelope without error")
+	}
+	if envelope.ExecutionPayload == nil {
+		return req, fmt.Errorf("envelope has nil ExecutionPayload")
+	}
+
+	if envelope.ParentBeaconBlockRoot == nil {
+		zeroHash := common.Hash{}
+		envelope.ParentBeaconBlockRoot = &zeroHash
+	}
 
 	// We set write deadline, if available, to safely write without blocking on a throttling peer connection
 	_ = stream.SetWriteDeadline(time.Now().Add(serverWriteChunkTimeout))
@@ -931,8 +942,14 @@ func (srv *ReqRespServer) handleSyncRequest(ctx context.Context, stream network.
 		if _, err := stream.Write(tmp[:]); err != nil {
 			return req, fmt.Errorf("failed to write response header data: %w", err)
 		}
-		if _, err := envelope.MarshalSSZ(w); err != nil {
-			return req, fmt.Errorf("failed to write payload to sync response: %w", err)
+		if envelope.ParentBeaconBlockRoot == nil {
+			if _, err := envelope.ExecutionPayload.MarshalSSZ(w); err != nil {
+				return req, fmt.Errorf("failed to write payload to sync response: %w", err)
+			}
+		} else {
+			if _, err := envelope.MarshalSSZ(w); err != nil {
+				return req, fmt.Errorf("failed to write payload to sync response: %w", err)
+			}
 		}
 	} else {
 		// 0 - resultCode: success = 0

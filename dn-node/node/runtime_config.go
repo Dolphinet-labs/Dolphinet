@@ -117,6 +117,11 @@ func (r *RuntimeConfig) Load(ctx context.Context, p2pSignerAddress common.Addres
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.p2pBlockSignerAddr = p2pSignerAddress
+	if p2pSignerAddress != (common.Address{}) {
+		r.p2pAllowedSequencerAddrs = []common.Address{p2pSignerAddress}
+	} else {
+		r.p2pAllowedSequencerAddrs = []common.Address{}
+	}
 	r.required = params.ProtocolVersion(common.HexToHash("0x1"))
 	r.recommended = params.ProtocolVersion(common.HexToHash("0x1"))
 	r.log.Info("loaded new runtime config values!", "p2p_seq_address", r.p2pBlockSignerAddr)
