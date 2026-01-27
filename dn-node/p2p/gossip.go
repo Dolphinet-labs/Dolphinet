@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/rlp"
 	"sync"
 	"time"
 
@@ -17,12 +18,12 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/log"
-
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup"
 	"github.com/dolphinnet-labs/dolphinnet/dn-service/eth"
 	opsigner "github.com/dolphinnet-labs/dolphinnet/dn-service/signer"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 const (
@@ -86,6 +87,10 @@ func blocksTopicV4(cfg *rollup.Config) string {
 	return fmt.Sprintf("/optimism/%s/3/blocks", cfg.L2ChainID.String())
 }
 
+func transactionsTopicV1(cfg *rollup.Config) string {
+	return fmt.Sprintf("/optimism/%s/0/transactions", cfg.L2ChainID.String())
+}
+
 // BuildSubscriptionFilter builds a simple subscription filter,
 // to help protect against peers spamming useless subscriptions.
 func BuildSubscriptionFilter(cfg *rollup.Config) pubsub.SubscriptionFilter {
@@ -93,7 +98,8 @@ func BuildSubscriptionFilter(cfg *rollup.Config) pubsub.SubscriptionFilter {
 		blocksTopicV1(cfg),
 		blocksTopicV2(cfg),
 		blocksTopicV3(cfg),
-		blocksTopicV4(cfg), // add more topics here in the future, if any.
+		blocksTopicV4(cfg),
+		transactionsTopicV1(cfg),
 	)
 }
 
@@ -403,8 +409,74 @@ func verifyBlockSignature(log log.Logger, cfg *rollup.Config, runCfg GossipRunti
 	return pubsub.ValidationReject
 }
 
+func BuildTransactionsValidator(log log.Logger) pubsub.ValidatorEx {
+	txHashLRU, err := lru.New[common.Hash, struct{}](10000)
+	if err != nil {
+		panic(fmt.Errorf("failed to set up transaction hash LRU cache: %w", err))
+	}
+
+	return func(ctx context.Context, id peer.ID, message *pubsub.Message) pubsub.ValidationResult {
+		outLen, err := snappy.DecodedLen(message.Data)
+		if err != nil {
+			log.Warn("invalid snappy compression length data for transactions", "err", err, "peer", id)
+			return pubsub.ValidationReject
+		}
+		if outLen > maxGossipSize {
+			log.Warn("possible snappy zip bomb, decoded length is too large", "decoded_length", outLen, "peer", id)
+			return pubsub.ValidationReject
+		}
+		if outLen < 1 {
+			log.Warn("rejecting empty transaction gossip payload")
+			return pubsub.ValidationReject
+		}
+
+		res := msgBufPool.Get().(*[]byte)
+		defer msgBufPool.Put(res)
+		data, err := snappy.Decode((*res)[:cap(*res)], message.Data)
+		if err != nil {
+			log.Warn("invalid snappy compression for transactions", "err", err, "peer", id)
+			return pubsub.ValidationReject
+		}
+		if cap(data) > cap(*res) {
+			*res = data[:cap(data)]
+		}
+
+		var txs types.Transactions
+		stream := rlp.NewStream(bytes.NewReader(data), uint64(len(data)))
+		if err := stream.Decode(&txs); err != nil {
+			log.Warn("invalid transaction RLP encoding", "err", err, "peer", id)
+			return pubsub.ValidationReject
+		}
+
+		if len(txs) == 0 {
+			log.Warn("empty transaction list")
+			return pubsub.ValidationReject
+		}
+
+		validTxs := make([]*types.Transaction, 0, len(txs))
+		for _, tx := range txs {
+			txHash := tx.Hash()
+
+			if _, seen := txHashLRU.Get(txHash); seen {
+				log.Debug("ignoring duplicate transaction", "hash", txHash, "peer", id)
+				continue
+			}
+
+			txHashLRU.Add(txHash, struct{}{})
+			validTxs = append(validTxs, tx)
+		}
+
+		if len(validTxs) == 0 {
+			return pubsub.ValidationIgnore
+		}
+		message.ValidatorData = validTxs
+		return pubsub.ValidationAccept
+	}
+}
+
 type GossipIn interface {
 	OnUnsafeL2Payload(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error
+	OnUnsafeTransactions(ctx context.Context, from peer.ID, txs []*types.Transaction) error
 }
 
 type GossipTopicInfo interface {
@@ -419,6 +491,7 @@ type GossipOut interface {
 	GossipTopicInfo
 	SignAndPublishL2Payload(ctx context.Context, msg *eth.ExecutionPayloadEnvelope, signer Signer) error
 	PublishSignedL2Payload(ctx context.Context, signedEnvelope *opsigner.SignedExecutionPayloadEnvelope) error
+	PublishTransactions(ctx context.Context, txs []*types.Transaction) error
 	Close() error
 }
 
@@ -437,6 +510,18 @@ func (bt *blockTopic) Close() error {
 	return bt.topic.Close()
 }
 
+type transactionTopic struct {
+	topic  *pubsub.Topic
+	events *pubsub.TopicEventHandler
+	sub    *pubsub.Subscription
+}
+
+func (tt *transactionTopic) Close() error {
+	tt.events.Cancel()
+	tt.sub.Cancel()
+	return tt.topic.Close()
+}
+
 type publisher struct {
 	log log.Logger
 	cfg *rollup.Config
@@ -446,10 +531,11 @@ type publisher struct {
 	// thus we have to stop it ourselves this way.
 	p2pCancel context.CancelFunc
 
-	blocksV1 *blockTopic
-	blocksV2 *blockTopic
-	blocksV3 *blockTopic
-	blocksV4 *blockTopic
+	blocksV1       *blockTopic
+	blocksV2       *blockTopic
+	blocksV3       *blockTopic
+	blocksV4       *blockTopic
+	transactionsV1 *transactionTopic
 
 	runCfg GossipRuntimeConfig
 }
@@ -494,6 +580,21 @@ func (p *publisher) BlocksTopicV3Peers() []peer.ID {
 
 func (p *publisher) BlocksTopicV4Peers() []peer.ID {
 	return p.blocksV4.topic.ListPeers()
+}
+
+func (p *publisher) PublishTransactions(ctx context.Context, txs []*types.Transaction) error {
+	if len(txs) == 0 {
+		return errors.New("empty transaction list")
+	}
+
+	var buf bytes.Buffer
+	if err := rlp.Encode(&buf, txs); err != nil {
+		return fmt.Errorf("failed to encode transactions: %w", err)
+	}
+
+	data := snappy.Encode(nil, buf.Bytes())
+
+	return p.transactionsV1.topic.Publish(ctx, data)
 }
 
 func (p *publisher) PublishSignedL2Payload(ctx context.Context, signedEnvelope *opsigner.SignedExecutionPayloadEnvelope) error {
@@ -572,7 +673,10 @@ func (p *publisher) Close() error {
 	p.p2pCancel()
 	e1 := p.blocksV1.Close()
 	e2 := p.blocksV2.Close()
-	return errors.Join(e1, e2)
+	e3 := p.blocksV3.Close()
+	e4 := p.blocksV4.Close()
+	e5 := p.transactionsV1.Close()
+	return errors.Join(e1, e2, e3, e4, e5)
 }
 
 func JoinGossip(self peer.ID, ps *pubsub.PubSub, log log.Logger, cfg *rollup.Config, runCfg GossipRuntimeConfig, gossipIn GossipIn) (GossipOut, error) {
@@ -610,15 +714,24 @@ func JoinGossip(self peer.ID, ps *pubsub.PubSub, log log.Logger, cfg *rollup.Con
 		return nil, fmt.Errorf("failed to setup blocks v4 p2p: %w", err)
 	}
 
+	txsLogger := log.New("topic", "transactionsV1")
+	transactionsValidator := guardGossipValidator(log, logValidationResult(self, "validated transactions", txsLogger, BuildTransactionsValidator(txsLogger)))
+	transactionsV1, err := newTransactionTopic(p2pCtx, transactionsTopicV1(cfg), ps, txsLogger, gossipIn, transactionsValidator)
+	if err != nil {
+		p2pCancel()
+		return nil, fmt.Errorf("failed to setup transactions p2p: %w", err)
+	}
+
 	return &publisher{
-		log:       log,
-		cfg:       cfg,
-		p2pCancel: p2pCancel,
-		blocksV1:  blocksV1,
-		blocksV2:  blocksV2,
-		blocksV3:  blocksV3,
-		blocksV4:  blocksV4,
-		runCfg:    runCfg,
+		log:            log,
+		cfg:            cfg,
+		p2pCancel:      p2pCancel,
+		blocksV1:       blocksV1,
+		blocksV2:       blocksV2,
+		blocksV3:       blocksV3,
+		blocksV4:       blocksV4,
+		transactionsV1: transactionsV1,
+		runCfg:         runCfg,
 	}, nil
 }
 
@@ -660,6 +773,44 @@ func newBlockTopic(ctx context.Context, topicId string, ps *pubsub.PubSub, log l
 	}, nil
 }
 
+func newTransactionTopic(ctx context.Context, topicId string, ps *pubsub.PubSub, log log.Logger, gossipIn GossipIn, validator pubsub.ValidatorEx) (*transactionTopic, error) {
+	err := ps.RegisterTopicValidator(topicId,
+		validator,
+		pubsub.WithValidatorTimeout(3*time.Second),
+		pubsub.WithValidatorConcurrency(4))
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to register transactions gossip topic: %w", err)
+	}
+
+	transactionsTopic, err := ps.Join(topicId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to join transactions gossip topic: %w", err)
+	}
+
+	transactionsTopicEvents, err := transactionsTopic.EventHandler()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transactions gossip topic handler: %w", err)
+	}
+
+	go LogTopicEvents(ctx, log, transactionsTopicEvents)
+
+	subscription, err := transactionsTopic.Subscribe()
+	if err != nil {
+		err = errors.Join(err, transactionsTopic.Close())
+		return nil, fmt.Errorf("failed to subscribe to transactions gossip topic: %w", err)
+	}
+
+	subscriber := MakeSubscriber(log, TransactionsHandler(gossipIn.OnUnsafeTransactions))
+	go subscriber(ctx, subscription)
+
+	return &transactionTopic{
+		topic:  transactionsTopic,
+		events: transactionsTopicEvents,
+		sub:    subscription,
+	}, nil
+}
+
 type TopicSubscriber func(ctx context.Context, sub *pubsub.Subscription)
 type MessageHandler func(ctx context.Context, from peer.ID, msg any) error
 
@@ -670,6 +821,16 @@ func BlocksHandler(onBlock func(ctx context.Context, from peer.ID, msg *eth.Exec
 			return fmt.Errorf("expected topic validator to parse and validate data into execution payload, but got %T", msg)
 		}
 		return onBlock(ctx, from, payload)
+	}
+}
+
+func TransactionsHandler(onTransactions func(ctx context.Context, from peer.ID, txs []*types.Transaction) error) MessageHandler {
+	return func(ctx context.Context, from peer.ID, msg any) error {
+		txs, ok := msg.([]*types.Transaction)
+		if !ok {
+			return fmt.Errorf("expected topic validator to parse and validate data into transactions, but got %T", msg)
+		}
+		return onTransactions(ctx, from, txs)
 	}
 }
 

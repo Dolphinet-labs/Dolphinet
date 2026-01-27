@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"io"
 	gosync "sync"
 	"sync/atomic"
@@ -81,6 +83,10 @@ type OpNode struct {
 	// PoS Manager client
 	managerClient *pos.ManagerClient
 	posEmitter    event.Emitter // emitter for triggering SequencerActionEvent
+
+	// Current epoch schedule for determining block producer
+	currentEpochSchedule *pos.EpochSchedule
+	epochScheduleMu      gosync.RWMutex
 
 	// some resources cannot be stopped directly, like the p2p gossipsub router (not our design),
 	// and depend on this ctx to be closed.
@@ -290,6 +296,11 @@ func (n *OpNode) initRPCServer(cfg *Config) error {
 		})
 		n.log.Info("Admin RPC enabled")
 	}
+	server.AddAPI(rpc.API{
+		Namespace: "opnode",
+		Service:   NewOpNodeAPI(n),
+	})
+	n.log.Info("OpNode RPC enabled")
 	n.log.Info("Starting JSON-RPC server")
 	if err := server.Start(); err != nil {
 		return fmt.Errorf("unable to start RPC server: %w", err)
@@ -415,7 +426,12 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 			"epoch", schedule.Epoch,
 			"start_block", schedule.StartBlock,
 			"end_block", schedule.EndBlock)
-		
+
+		// Store current epoch schedule for determining block producer
+		n.epochScheduleMu.Lock()
+		n.currentEpochSchedule = &schedule
+		n.epochScheduleMu.Unlock()
+
 		// Update allowed sequencer addresses from the epoch schedule
 		// The schedule contains all validator addresses that can produce blocks in this epoch
 		if len(schedule.Validators) > 0 {
@@ -427,7 +443,7 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 			n.log.Info("Updated allowed sequencer addresses from epoch schedule",
 				"count", len(validatorAddrs))
 		}
-		
+
 		return nil
 	})
 
@@ -560,6 +576,130 @@ func (n *OpNode) OnUnsafeL2Payload(ctx context.Context, from peer.ID, envelope *
 	}
 
 	return nil
+}
+
+func (n *OpNode) OnUnsafeTransactions(ctx context.Context, from peer.ID, txs []*types.Transaction) error {
+	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil && from == p2pNode.Host().ID() {
+		return nil
+	}
+
+	n.log.Info("Received transactions from P2P", "count", len(txs), "peer", from)
+
+	isProducer, err := n.isCurrentBlockProducer(ctx)
+	if err != nil {
+		n.log.Warn("Failed to determine if current block producer", "err", err)
+		return nil
+	}
+
+	if !isProducer {
+		n.log.Debug("Not current block producer, ignoring P2P transactions")
+		return nil
+	}
+
+	if n.l2Source == nil || n.l2Source.EngineAPIClient == nil || n.l2Source.EngineAPIClient.RPC == nil {
+		return fmt.Errorf("L2 source not available")
+	}
+
+	n.log.Info("Current block producer: adding P2P transactions to local txpool", "count", len(txs))
+	for _, tx := range txs {
+		txData, err := tx.MarshalBinary()
+		if err != nil {
+			n.log.Warn("Failed to marshal transaction", "hash", tx.Hash(), "err", err)
+			continue
+		}
+		var result common.Hash
+		if err := n.l2Source.EngineAPIClient.RPC.CallContext(ctx, &result, "eth_sendRawTransaction", hexutil.Encode(txData)); err != nil {
+			n.log.Debug("Failed to add transaction to txpool (may already exist)", "hash", tx.Hash(), "err", err)
+		} else {
+			n.log.Debug("Added transaction to txpool from P2P", "hash", tx.Hash())
+		}
+	}
+
+	return nil
+}
+
+func (n *OpNode) PublishTransactions(ctx context.Context, txs []*types.Transaction) error {
+	if len(txs) == 0 {
+		return nil
+	}
+
+	isProducer, err := n.isCurrentBlockProducer(ctx)
+	if err != nil {
+		n.log.Warn("Failed to determine if current block producer", "err", err)
+		isProducer = false
+	}
+
+	if isProducer {
+		if n.l2Source == nil || n.l2Source.EngineAPIClient == nil || n.l2Source.EngineAPIClient.RPC == nil {
+			return fmt.Errorf("L2 source not available")
+		}
+
+		n.log.Info("Current block producer: adding transactions to local txpool", "count", len(txs))
+		for _, tx := range txs {
+			txData, err := tx.MarshalBinary()
+			if err != nil {
+				n.log.Warn("Failed to marshal transaction", "hash", tx.Hash(), "err", err)
+				continue
+			}
+
+			var result common.Hash
+			if err := n.l2Source.EngineAPIClient.RPC.CallContext(ctx, &result, "eth_sendRawTransaction", hexutil.Encode(txData)); err != nil {
+				n.log.Debug("Failed to add transaction to txpool (may already exist)", "hash", tx.Hash(), "err", err)
+			} else {
+				n.log.Debug("Added transaction to txpool", "hash", tx.Hash())
+			}
+		}
+		return nil
+	}
+
+	p2pNode := n.getP2PNodeIfEnabled()
+	if p2pNode == nil {
+		return fmt.Errorf("P2P not enabled, cannot forward transactions")
+	}
+
+	n.log.Info("Not current block producer: forwarding transactions via P2P", "count", len(txs))
+	return p2pNode.GossipOut().PublishTransactions(ctx, txs)
+}
+
+// isCurrentBlockProducer checks if this node is the current block producer based on epoch schedule
+func (n *OpNode) isCurrentBlockProducer(ctx context.Context) (bool, error) {
+	if !n.cfg.Driver.PosMode {
+		return false, nil
+	}
+
+	n.epochScheduleMu.RLock()
+	schedule := n.currentEpochSchedule
+	n.epochScheduleMu.RUnlock()
+
+	if schedule == nil {
+		// No epoch schedule received yet, cannot determine
+		return false, nil
+	}
+
+	if n.l2Source == nil {
+		return false, nil
+	}
+
+	head, err := n.l2Source.L2BlockRefByLabel(ctx, eth.Unsafe)
+	if err != nil {
+		n.log.Debug("Failed to get current block number", "err", err)
+		return false, nil
+	}
+
+	nextBlockNumber := head.Number + 1
+
+	for _, assignment := range schedule.Assignments {
+		if assignment.BlockNumber == nextBlockNumber {
+			isProducer := assignment.Validator == n.cfg.P2PSignerAddress
+			if isProducer {
+				n.log.Debug("This node is the current block producer", "block_number", nextBlockNumber)
+			}
+			return isProducer, nil
+		}
+	}
+
+	n.log.Debug("No assignment found for next block, not the current producer", "next_block", nextBlockNumber)
+	return false, nil
 }
 
 func (n *OpNode) RequestL2Range(ctx context.Context, start, end eth.L2BlockRef) error {
