@@ -256,8 +256,10 @@ func (c *ManagerClient) readPump(done chan struct{}) {
 
 // writePump writes messages in a loop (heartbeat)
 func (c *ManagerClient) writePump(done chan struct{}) {
-	ticker := time.NewTicker(pingPeriod)
-	defer ticker.Stop()
+	pingTicker := time.NewTicker(pingPeriod)
+	heartbeatTicker := time.NewTicker(2 * time.Second) // Send heartbeat every 10 seconds
+	defer pingTicker.Stop()
+	defer heartbeatTicker.Stop()
 
 	c.connMu.RLock()
 	conn := c.conn
@@ -269,14 +271,42 @@ func (c *ManagerClient) writePump(done chan struct{}) {
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-pingTicker.C:
 			conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := conn.WriteMessage(gorillaWS.PingMessage, nil); err != nil {
 				return
 			}
+		case <-heartbeatTicker.C:
+			c.sendHeartbeat()
 		case <-done:
 			return
 		}
+	}
+}
+
+func (c *ManagerClient) sendHeartbeat() {
+	c.stateMu.RLock()
+	blockNumber := c.currentBlockNumber
+	epoch := c.currentEpoch
+	c.stateMu.RUnlock()
+
+	msg := HeartbeatMessage{
+		Type:        MessageTypeHeartbeat,
+		Timestamp:   time.Now(),
+		BlockNumber: blockNumber,
+		Epoch:       epoch,
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		c.log.Error("Failed to marshal heartbeat message", "err", err)
+		return
+	}
+
+	if err := c.sendMessage(data); err != nil {
+		c.log.Debug("Failed to send heartbeat", "err", err)
+	} else {
+		c.log.Debug("Sent heartbeat to manager", "block", blockNumber, "epoch", epoch)
 	}
 }
 
