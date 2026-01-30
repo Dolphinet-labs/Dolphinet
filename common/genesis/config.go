@@ -38,7 +38,7 @@ const (
 	// BaseFeeMaxChangeDenominator represents the maximum change in base fee per block.
 	BaseFeeMaxChangeDenominator = 8
 	// MinimumBaseFee represents the minimum base fee for deposits.
-	MinimumBaseFee = params.GWei
+	MinimumBaseFee = params.DOLGWei
 	// SystemTxMaxGas represents the maximum gas that a system transaction can use
 	// when it is included with user deposits.
 	SystemTxMaxGas = 1_000_000

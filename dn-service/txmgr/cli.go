@@ -101,7 +101,7 @@ var (
 	}
 
 	// geth enforces a 1 gwei minimum for blob tx fee
-	defaultMinBlobTxFee = big.NewInt(params.GWei)
+	defaultMinBlobTxFee = big.NewInt(params.DOLGWei)
 )
 
 func CLIFlags(envPrefix string) []cli.Flag {

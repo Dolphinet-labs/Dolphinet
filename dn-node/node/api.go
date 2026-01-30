@@ -206,3 +206,22 @@ func (api *opNodeAPI) PublishTransactions(ctx context.Context, txHexes []string)
 
 	return api.node.PublishTransactions(ctx, txs)
 }
+
+func (api *opNodeAPI) GetValidatorForBlock(ctx context.Context, blockNumber hexutil.Uint64) (common.Address, error) {
+	api.node.epochScheduleMu.RLock()
+	schedule := api.node.currentEpochSchedule
+	api.node.epochScheduleMu.RUnlock()
+
+	if schedule == nil {
+		return common.Address{}, fmt.Errorf("no epoch schedule available")
+	}
+
+	blockNum := uint64(blockNumber)
+	for _, assignment := range schedule.Assignments {
+		if assignment.BlockNumber == blockNum {
+			return assignment.Validator, nil
+		}
+	}
+
+	return common.Address{}, fmt.Errorf("no validator assignment found for block %d", blockNum)
+}
