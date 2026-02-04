@@ -447,6 +447,107 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 		return nil
 	})
 
+	client.SetOnVoteReward(func(reward pos.VoteRewardMessage) error {
+		n.log.Info("Received vote reward from manager",
+			"target_block", reward.TargetBlock,
+			"voted_block", reward.VotedBlock,
+			"reward_count", len(reward.Rewards))
+
+		if n.l2Source == nil || n.l2Source.EngineAPIClient == nil {
+			n.log.Warn("L2Source not available, cannot set vote rewards")
+			return nil
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rewards := make([]map[string]interface{}, 0, len(reward.Rewards))
+		for _, r := range reward.Rewards {
+			rewards = append(rewards, map[string]interface{}{
+				"voter":  r.Voter.Hex(),
+				"amount": r.Amount,
+			})
+		}
+
+		err := n.l2Source.EngineAPIClient.RPC.CallContext(ctx, nil, "engine_setVoteRewards", hexutil.Uint64(reward.TargetBlock), rewards)
+		if err != nil {
+			n.log.Error("Failed to set vote rewards in geth", "err", err, "target_block", reward.TargetBlock, "voted_block", reward.VotedBlock)
+			return err
+		}
+
+		n.log.Info("Set vote rewards in geth", "target_block", reward.TargetBlock, "voted_block", reward.VotedBlock, "count", len(rewards))
+		return nil
+	})
+
+	client.SetOnVoteRequest(func(request pos.VoteRequestMessage) error {
+		n.log.Info("Received vote request from manager",
+			"block_number", request.BlockNumber,
+			"deadline", request.VoteDeadline)
+
+		if time.Now().After(request.VoteDeadline) {
+			n.log.Warn("Vote deadline has passed, ignoring vote request", "block", request.BlockNumber)
+			return nil
+		}
+
+		if n.l2Source == nil || n.l2Source.L2Client == nil {
+			n.log.Warn("L2Source not available, cannot fetch block hash")
+			return nil
+		}
+
+		var blockRef eth.L2BlockRef
+		var err error
+		retryInterval := 500 * time.Millisecond
+		maxRetries := int(time.Until(request.VoteDeadline) / retryInterval)
+		if maxRetries > 20 {
+			maxRetries = 20
+		}
+		if maxRetries < 1 {
+			maxRetries = 1
+		}
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if time.Now().After(request.VoteDeadline) {
+				n.log.Warn("Vote deadline passed while retrying", "block", request.BlockNumber, "attempts", attempt+1)
+				return nil
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			blockRef, err = n.l2Source.L2Client.L2BlockRefByNumber(ctx, request.BlockNumber)
+			cancel()
+
+			if err == nil {
+				break
+			}
+
+			if attempt < maxRetries-1 {
+				time.Sleep(retryInterval)
+			}
+		}
+
+		if err != nil {
+			n.log.Error("Failed to get block ref for voting after retries", "block", request.BlockNumber, "err", err, "attempts", maxRetries)
+			return err
+		}
+
+		blockHash := blockRef.Hash
+
+		voteMsg := pos.BlockVoteMessage{
+			Type:        pos.MessageTypeBlockVote,
+			Voter:       n.cfg.P2PSignerAddress,
+			BlockNumber: request.BlockNumber,
+			BlockHash:   blockHash,
+			Timestamp:   time.Now(),
+		}
+
+		if err := client.SendBlockVote(voteMsg); err != nil {
+			n.log.Error("Failed to send block vote", "err", err)
+			return err
+		}
+
+		n.log.Info("Sent block vote", "block", request.BlockNumber, "hash", blockHash.Hex())
+		return nil
+	})
+
 	n.managerClient = client
 
 	return nil

@@ -30,6 +30,7 @@ type ManagerClient struct {
 
 	conn       *gorillaWS.Conn
 	connMu     sync.RWMutex
+	writeMu    sync.Mutex // Protects WebSocket write operations (not concurrent-safe)
 	connCtx    context.Context
 	connCancel context.CancelFunc
 
@@ -43,6 +44,8 @@ type ManagerClient struct {
 	onBlockAssignment func(assignment BlockAssignment) error
 	onEpochSchedule   func(schedule EpochSchedule) error
 	onHeartbeat       func(heartbeat HeartbeatMessage) error
+	onVoteReward      func(reward VoteRewardMessage) error
+	onVoteRequest     func(request VoteRequestMessage) error
 
 	currentBlockNumber uint64
 	currentEpoch       uint64
@@ -78,6 +81,16 @@ func (c *ManagerClient) SetOnEpochSchedule(fn func(schedule EpochSchedule) error
 // SetOnHeartbeat sets the heartbeat callback
 func (c *ManagerClient) SetOnHeartbeat(fn func(heartbeat HeartbeatMessage) error) {
 	c.onHeartbeat = fn
+}
+
+// SetOnVoteReward sets the vote reward callback
+func (c *ManagerClient) SetOnVoteReward(fn func(reward VoteRewardMessage) error) {
+	c.onVoteReward = fn
+}
+
+// SetOnVoteRequest sets the vote request callback
+func (c *ManagerClient) SetOnVoteRequest(fn func(request VoteRequestMessage) error) {
+	c.onVoteRequest = fn
 }
 
 // Start starts the client and begins connection and reconnection loop
@@ -174,10 +187,8 @@ func (c *ManagerClient) connect(ctx context.Context) error {
 
 	c.log.Info("Connected to manager")
 
-	// Send ValidatorRegister message immediately after successful connection
-	if err := c.registerValidator(); err != nil {
-		c.log.Warn("Failed to register validator", "err", err)
-		// Don't return error, allow connection to continue
+	if err := c.registerNode(); err != nil {
+		c.log.Warn("Failed to register node", "err", err)
 	}
 
 	return nil
@@ -201,6 +212,11 @@ func (c *ManagerClient) sendMessage(data []byte) error {
 	if conn == nil {
 		return fmt.Errorf("not connected")
 	}
+
+	// WebSocket connections are not concurrent-safe for writing
+	// Use writeMu to serialize all write operations
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	conn.SetWriteDeadline(time.Now().Add(writeWait))
 	return conn.WriteMessage(gorillaWS.TextMessage, data)
@@ -247,10 +263,6 @@ func (c *ManagerClient) readPump(done chan struct{}) {
 				c.log.Error("Failed to handle message", "err", err, "message_preview", string(msg[:previewLen]))
 			}
 		}
-
-		if err := c.handleMessage(message); err != nil {
-			c.log.Error("Failed to handle message", "err", err)
-		}
 	}
 }
 
@@ -272,8 +284,13 @@ func (c *ManagerClient) writePump(done chan struct{}) {
 	for {
 		select {
 		case <-pingTicker.C:
+			// WebSocket connections are not concurrent-safe for writing
+			// Use writeMu to serialize all write operations
+			c.writeMu.Lock()
 			conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := conn.WriteMessage(gorillaWS.PingMessage, nil); err != nil {
+			err := conn.WriteMessage(gorillaWS.PingMessage, nil)
+			c.writeMu.Unlock()
+			if err != nil {
 				return
 			}
 		case <-heartbeatTicker.C:
@@ -308,6 +325,23 @@ func (c *ManagerClient) sendHeartbeat() {
 	} else {
 		c.log.Debug("Sent heartbeat to manager", "block", blockNumber, "epoch", epoch)
 	}
+}
+
+// SendBlockVote sends a block vote to the manager
+func (c *ManagerClient) SendBlockVote(vote BlockVoteMessage) error {
+	data, err := json.Marshal(vote)
+	if err != nil {
+		c.log.Error("Failed to marshal block vote", "err", err)
+		return err
+	}
+
+	if err := c.sendMessage(data); err != nil {
+		c.log.Error("Failed to send block vote", "err", err)
+		return err
+	}
+
+	c.log.Debug("Sent block vote to manager", "block", vote.BlockNumber, "hash", vote.BlockHash.Hex())
+	return nil
 }
 
 // handleMessage processes received messages
@@ -384,6 +418,39 @@ func (c *ManagerClient) handleMessage(data []byte) error {
 			c.lastHeartbeat = time.Now()
 		})
 
+	case MessageTypeVoteReward:
+		var msg VoteRewardMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return fmt.Errorf("failed to unmarshal vote reward: %w", err)
+		}
+
+		c.log.Info("Received vote reward from manager",
+			"target_block", msg.TargetBlock,
+			"voted_block", msg.VotedBlock,
+			"reward_count", len(msg.Rewards))
+
+		if c.onVoteReward != nil {
+			if err := c.onVoteReward(msg); err != nil {
+				return fmt.Errorf("vote reward callback error: %w", err)
+			}
+		}
+
+	case MessageTypeVoteRequest:
+		var msg VoteRequestMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return fmt.Errorf("failed to unmarshal vote request: %w", err)
+		}
+
+		c.log.Info("Received vote request from manager",
+			"block", msg.BlockNumber,
+			"deadline", msg.VoteDeadline)
+
+		if c.onVoteRequest != nil {
+			if err := c.onVoteRequest(msg); err != nil {
+				return fmt.Errorf("vote request callback error: %w", err)
+			}
+		}
+
 	default:
 		c.log.Debug("Unknown message type", "type", base.Type)
 	}
@@ -391,15 +458,14 @@ func (c *ManagerClient) handleMessage(data []byte) error {
 	return nil
 }
 
-// registerValidator sends ValidatorRegister message to register the validator
-func (c *ManagerClient) registerValidator() error {
+func (c *ManagerClient) registerNode() error {
 	if c.validatorAddr == (common.Address{}) {
 		c.log.Warn("Validator address not set, skipping registration")
 		return nil
 	}
 
-	msg := ValidatorRegisterMessage{
-		Type:    MessageTypeValidatorRegister,
+	msg := NodeRegisterMessage{
+		Type:    MessageTypeNodeRegister,
 		Address: c.validatorAddr,
 	}
 
@@ -408,7 +474,7 @@ func (c *ManagerClient) registerValidator() error {
 		return fmt.Errorf("failed to marshal register message: %w", err)
 	}
 
-	c.log.Info("Registering validator with manager", "address", c.validatorAddr.Hex())
+	c.log.Info("Registering node with manager", "address", c.validatorAddr.Hex())
 	return c.sendMessage(data)
 }
 

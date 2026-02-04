@@ -9,11 +9,14 @@ import (
 
 // Message type constants
 const (
-	MessageTypeBlockAssignment   = "block_assignment"
-	MessageTypeEpochSchedule     = "epoch_schedule"
-	MessageTypeHeartbeat         = "heartbeat"
-	MessageTypeValidatorRegister = "validator_register"
-	MessageTypeValidatorStatus   = "validator_status"
+	MessageTypeBlockAssignment = "block_assignment"
+	MessageTypeEpochSchedule   = "epoch_schedule"
+	MessageTypeHeartbeat       = "heartbeat"
+	MessageTypeNodeRegister    = "node_register" // Unified registration message for both validators and voters
+	MessageTypeValidatorStatus = "validator_status"
+	MessageTypeVoteReward      = "vote_reward"
+	MessageTypeVoteRequest     = "vote_request"
+	MessageTypeBlockVote       = "block_vote"
 )
 
 // BlockAssignmentMessage block assignment message
@@ -36,8 +39,8 @@ type HeartbeatMessage struct {
 	Epoch       uint64    `json:"epoch"`
 }
 
-// ValidatorRegisterMessage validator registration message
-type ValidatorRegisterMessage struct {
+// NodeRegisterMessage node registration message (for both validators and voters)
+type NodeRegisterMessage struct {
 	Type    string         `json:"type"`
 	Address common.Address `json:"address"`
 }
@@ -68,6 +71,37 @@ type EpochSchedule struct {
 	CreatedAt   time.Time                 `json:"created_at"`
 }
 
+// VoteRewardMessage vote reward message from manager
+type VoteRewardMessage struct {
+	Type        string                   `json:"type"`
+	TargetBlock uint64                   `json:"target_block"`
+	VotedBlock  uint64                   `json:"voted_block"`
+	Rewards     []VoteRewardDistribution `json:"rewards"`
+}
+
+// VoteRewardDistribution vote reward distribution for a single voter
+type VoteRewardDistribution struct {
+	Voter  common.Address `json:"voter"`
+	Amount string         `json:"amount"`
+}
+
+// VoteRequestMessage vote request message from manager to voting nodes
+type VoteRequestMessage struct {
+	Type         string    `json:"type"`
+	BlockNumber  uint64    `json:"block_number"`
+	Timestamp    time.Time `json:"timestamp"`
+	VoteDeadline time.Time `json:"vote_deadline"`
+}
+
+// BlockVoteMessage block vote message from voting nodes to manager
+type BlockVoteMessage struct {
+	Type        string         `json:"type"`
+	Voter       common.Address `json:"voter"`
+	BlockNumber uint64         `json:"block_number"`
+	BlockHash   common.Hash    `json:"block_hash"`
+	Timestamp   time.Time      `json:"timestamp"`
+}
+
 // ParseMessage parses a message (for testing)
 func ParseMessage(data []byte) (interface{}, error) {
 	var base struct {
@@ -91,12 +125,24 @@ func ParseMessage(data []byte) (interface{}, error) {
 		var msg HeartbeatMessage
 		err := json.Unmarshal(data, &msg)
 		return msg, err
-	case MessageTypeValidatorRegister:
-		var msg ValidatorRegisterMessage
+	case MessageTypeNodeRegister:
+		var msg NodeRegisterMessage
 		err := json.Unmarshal(data, &msg)
 		return msg, err
 	case MessageTypeValidatorStatus:
 		var msg ValidatorStatusMessage
+		err := json.Unmarshal(data, &msg)
+		return msg, err
+	case MessageTypeVoteReward:
+		var msg VoteRewardMessage
+		err := json.Unmarshal(data, &msg)
+		return msg, err
+	case MessageTypeVoteRequest:
+		var msg VoteRequestMessage
+		err := json.Unmarshal(data, &msg)
+		return msg, err
+	case MessageTypeBlockVote:
+		var msg BlockVoteMessage
 		err := json.Unmarshal(data, &msg)
 		return msg, err
 	default:
