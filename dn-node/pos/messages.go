@@ -1,7 +1,6 @@
 package pos
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -9,14 +8,16 @@ import (
 
 // Message type constants
 const (
-	MessageTypeBlockAssignment = "block_assignment"
-	MessageTypeEpochSchedule   = "epoch_schedule"
-	MessageTypeHeartbeat       = "heartbeat"
-	MessageTypeNodeRegister    = "node_register" // Unified registration message for both validators and voters
-	MessageTypeValidatorStatus = "validator_status"
-	MessageTypeVoteReward      = "vote_reward"
-	MessageTypeVoteRequest     = "vote_request"
-	MessageTypeBlockVote       = "block_vote"
+	MessageTypeBlockAssignment   = "block_assignment"
+	MessageTypeEpochSchedule     = "epoch_schedule"
+	MessageTypeHeartbeat         = "heartbeat"
+	MessageTypeNodeRegister      = "node_register" // Unified registration message for both validators and voters
+	MessageTypeValidatorStatus   = "validator_status"
+	MessageTypeVoteReward        = "vote_reward"
+	MessageTypeVoteRequest       = "vote_request"
+	MessageTypeVoteRewardRequest = "vote_reward_request"
+	MessageTypeBlockVote         = "block_vote"
+	MessageTypeRegisterAck       = "register_ack"
 )
 
 // BlockAssignmentMessage block assignment message
@@ -102,50 +103,8 @@ type BlockVoteMessage struct {
 	Timestamp   time.Time      `json:"timestamp"`
 }
 
-// ParseMessage parses a message (for testing)
-func ParseMessage(data []byte) (interface{}, error) {
-	var base struct {
-		Type string `json:"type"`
-	}
-
-	if err := json.Unmarshal(data, &base); err != nil {
-		return nil, err
-	}
-
-	switch base.Type {
-	case MessageTypeBlockAssignment:
-		var msg BlockAssignmentMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	case MessageTypeEpochSchedule:
-		var msg EpochScheduleMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	case MessageTypeHeartbeat:
-		var msg HeartbeatMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	case MessageTypeNodeRegister:
-		var msg NodeRegisterMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	case MessageTypeValidatorStatus:
-		var msg ValidatorStatusMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	case MessageTypeVoteReward:
-		var msg VoteRewardMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	case MessageTypeVoteRequest:
-		var msg VoteRequestMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	case MessageTypeBlockVote:
-		var msg BlockVoteMessage
-		err := json.Unmarshal(data, &msg)
-		return msg, err
-	default:
-		return nil, nil
-	}
+// VoteRewardRequestMessage vote reward request message from nodes to manager
+type VoteRewardRequestMessage struct {
+	Type       string `json:"type"`
+	StartBlock uint64 `json:"start_block"`
 }

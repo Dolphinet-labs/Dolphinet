@@ -46,6 +46,7 @@ type ManagerClient struct {
 	onHeartbeat       func(heartbeat HeartbeatMessage) error
 	onVoteReward      func(reward VoteRewardMessage) error
 	onVoteRequest     func(request VoteRequestMessage) error
+	onRegisterAck     func(status string) error
 
 	currentBlockNumber uint64
 	currentEpoch       uint64
@@ -91,6 +92,11 @@ func (c *ManagerClient) SetOnVoteReward(fn func(reward VoteRewardMessage) error)
 // SetOnVoteRequest sets the vote request callback
 func (c *ManagerClient) SetOnVoteRequest(fn func(request VoteRequestMessage) error) {
 	c.onVoteRequest = fn
+}
+
+// SetOnRegisterAck sets the register ack callback
+func (c *ManagerClient) SetOnRegisterAck(fn func(status string) error) {
+	c.onRegisterAck = fn
 }
 
 // Start starts the client and begins connection and reconnection loop
@@ -451,6 +457,26 @@ func (c *ManagerClient) handleMessage(data []byte) error {
 			}
 		}
 
+	case MessageTypeRegisterAck:
+		var msg struct {
+			Type    string `json:"type"`
+			Address string `json:"address"`
+			Status  string `json:"status"`
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return fmt.Errorf("failed to unmarshal register ack: %w", err)
+		}
+
+		c.log.Info("Received register ack from manager",
+			"address", msg.Address,
+			"status", msg.Status)
+
+		if c.onRegisterAck != nil {
+			if err := c.onRegisterAck(msg.Status); err != nil {
+				return fmt.Errorf("register ack callback error: %w", err)
+			}
+		}
+
 	default:
 		c.log.Debug("Unknown message type", "type", base.Type)
 	}
@@ -490,6 +516,22 @@ func (c *ManagerClient) SendValidatorStatus(blockNumber uint64, status string) e
 		return fmt.Errorf("failed to marshal status message: %w", err)
 	}
 
+	return c.sendMessage(data)
+}
+
+// RequestVoteRewards requests vote rewards for a block range from manager
+func (c *ManagerClient) RequestVoteRewards(startBlock uint64) error {
+	msg := VoteRewardRequestMessage{
+		Type:       MessageTypeVoteRewardRequest,
+		StartBlock: startBlock,
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal vote reward request message: %w", err)
+	}
+
+	c.log.Info("Requesting vote rewards from manager", "start_block", startBlock)
 	return c.sendMessage(data)
 }
 

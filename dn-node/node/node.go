@@ -548,6 +548,37 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 		return nil
 	})
 
+	client.SetOnRegisterAck(func(status string) error {
+		if status != "success" {
+			n.log.Warn("Registration failed, skipping vote reward request", "status", status)
+			return nil
+		}
+
+		n.log.Info("Registration successful, requesting missing vote rewards")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		head, err := n.l2Source.L2BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			n.log.Warn("Failed to get local head for vote reward request", "err", err)
+			return nil
+		}
+
+		startBlock := head.Number
+
+		n.log.Info("Requesting all vote rewards from manager",
+			"start_block", startBlock,
+			"local_head", head.Number)
+
+		if err := client.RequestVoteRewards(startBlock); err != nil {
+			n.log.Error("Failed to request vote rewards from manager", "err", err)
+			return err
+		}
+
+		return nil
+	})
+
 	n.managerClient = client
 
 	return nil
