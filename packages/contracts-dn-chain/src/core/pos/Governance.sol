@@ -37,11 +37,13 @@ contract DolphinetGovernance is
 {
     function initialize(
         address _manager,
-        address _delegationManager
+        address _delegationManager,
+        address _slashingManager
     ) public initializer {
         __Ownable_init(msg.sender);
         manager = _manager;
         delegationManager = IDelegationManager(_delegationManager);
+        slashingManager = ISlashingManager(_slashingManager);
         lastElectionTime = block.timestamp - ELECTION_INTERVAL; // Allow immediate election start
 
         electionFinalized = false;
@@ -62,13 +64,22 @@ contract DolphinetGovernance is
      * Requires staking native DOL within allowed range.
      */
     function registerCandidate() external {
-        require(!candidates[msg.sender].exists, "already candidate");
+        require(
+            !candidates[msg.sender].exists ||
+                candidates[msg.sender].lastElectionId < currentElectionId,
+            "already candidate"
+        );
 
         // requireing candidate to have delegated shares(as operator)
         uint256 shares = delegationManager.getOperatorShares(msg.sender);
         require(
             shares > 0,
             "Governance.registerCandidate: operator has no shares delegated"
+        );
+
+        require(
+            slashingManager.isOperatorJail(msg.sender) == false,
+            "operator is jailed"
         );
 
         Candidate storage c = candidates[msg.sender];
@@ -137,15 +148,15 @@ contract DolphinetGovernance is
         // Clear previous sets and role lookups
         _clearRankedSets();
 
-        for (uint256 i = 0; i < candidateList.length; i++) {
-            address op = candidateList[i];
-            Candidate storage c = candidates[op];
+        // for (uint256 i = 0; i < candidateList.length; i++) {
+        //     address op = candidateList[i];
+        //     Candidate storage c = candidates[op];
 
-            c.votes = 0;
-            c.lastElectionId = currentElectionId;
-            c.isValidator = false;
-            c.isBlockVoter = false;
-        }
+        //     c.votes = 0;
+        //     c.lastElectionId = currentElectionId;
+        //     c.isValidator = false;
+        //     c.isBlockVoter = false;
+        // }
 
         emit ElectionStarted(currentElectionId, block.timestamp);
     }
@@ -158,15 +169,15 @@ contract DolphinetGovernance is
         finalizedElectionId = 0;
         _clearRankedSets();
 
-        for (uint256 i = 0; i < candidateList.length; i++) {
-            address op = candidateList[i];
-            Candidate storage c = candidates[op];
+        // for (uint256 i = 0; i < candidateList.length; i++) {
+        //     address op = candidateList[i];
+        //     Candidate storage c = candidates[op];
 
-            c.votes = 0;
-            c.lastElectionId = currentElectionId;
-            c.isValidator = false;
-            c.isBlockVoter = false;
-        }
+        //     c.votes = 0;
+        //     c.lastElectionId = currentElectionId;
+        //     c.isValidator = false;
+        //     c.isBlockVoter = false;
+        // }
 
         emit ElectionStarted(currentElectionId, block.timestamp);
     }
@@ -176,23 +187,49 @@ contract DolphinetGovernance is
      * One address = one vote.
      * Voter must hold sufficient DOL balance.
      */
-    function vote(address candidateOp) external {
-        require(
-            msg.sender.balance >= MIN_VOTER_BALANCE,
-            "insufficient voting balance"
-        );
+    function vote(address candidateOp) external payable {
+        require(msg.value >= MIN_VOTER_BALANCE, "insufficient voting balance");
 
         uint256 eid = currentElectionId;
         require(eid > 0, "election not started");
         require(!hasVoted[eid][msg.sender], "already voted");
 
         Candidate storage c = candidates[candidateOp];
-        require(c.exists, "not candidate");
+        require(
+            c.exists && c.lastElectionId == currentElectionId,
+            "not a valid candidate"
+        );
 
+        // Lock the voting balance for this voter
+        voterLockedBalance[msg.sender] += msg.value;
+
+        // Mark the voter as having voted
         hasVoted[eid][msg.sender] = true;
+
+        // Update the candidate's vote count
         c.votes += 1;
 
         emit Voted(eid, msg.sender, candidateOp);
+    }
+
+    /**
+     * Claim the locked voting balance.
+     * Voter can claim the locked funds after the election.
+     */
+    function claim() external {
+        require(electionFinalized, "cannot claim before election finalized");
+
+        uint256 lockedAmount = voterLockedBalance[msg.sender];
+        require(lockedAmount > 0, "no balance to claim");
+
+        // Reset the locked balance
+        voterLockedBalance[msg.sender] = 0;
+
+        // Transfer the locked amount back to the voter
+        (bool sent, ) = msg.sender.call{value: lockedAmount}("");
+        require(sent, "transfer failed");
+
+        emit VoterClaimed(msg.sender, lockedAmount);
     }
 
     /**

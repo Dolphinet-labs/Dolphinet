@@ -53,6 +53,8 @@ interface IGovernance {
     );
     event ElectionFinalizedFlag(uint256 indexed electionId);
 
+    event VoterClaimed(address indexed voter, uint256 amount);
+
     // ========= ADMIN =========
 
     /// @notice Set governance manager address

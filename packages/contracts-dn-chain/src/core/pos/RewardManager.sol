@@ -98,6 +98,7 @@ contract RewardManager is RewardManagerStorage, Pausable {
         emit OperatorClaimReward(msg.sender, claimAmount);
 
         (bool success, ) = payable(msg.sender).call{value: claimAmount}("");
+        require(success, "RewardManager: ETH transfer failed");
 
         return success;
     }
@@ -175,8 +176,8 @@ contract RewardManager is RewardManagerStorage, Pausable {
         uint256 _stakePercent
     ) external onlyRewardManager {
         require(
-            _stakePercent > 0,
-            "RewardManager updateStakePercent: _stakePercent need more then zero"
+            _stakePercent > 0 && _stakePercent <= 100,
+            "RewardManager updateStakePercent: _stakePercent need more then zero and less than 100"
         );
         stakePercent = _stakePercent;
     }

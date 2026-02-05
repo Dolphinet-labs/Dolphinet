@@ -36,6 +36,8 @@ contract FdChainDepositManager is
         _DOMAIN_SEPARATOR = _calculateDomainSeparator();
         __Ownable_init(initialOwner);
         _initFdChainDepositManagerStorage(_delegation, _FdChainBase);
+
+        ORIGINAL_CHAIN_ID = block.chainid;
     }
 
     receive() external payable {}
