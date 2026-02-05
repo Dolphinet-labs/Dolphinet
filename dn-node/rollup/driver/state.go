@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup/finality"
 	"math/big"
 	gosync "sync"
 	"time"
@@ -232,11 +231,6 @@ func (s *Driver) eventLoop() {
 		if head := s.Engine.UnsafeL2Head(); head != lastUnsafeL2 || !s.Derivation.DerivationReady() {
 			lastUnsafeL2 = head
 			altSyncTicker.Reset(syncCheckInterval)
-		}
-
-		if s.SyncCfg.SyncMode == sync.CLSync {
-			s.emitter.Emit(finality.FinalizeL1Event{}) // todo: if all node vote change block to finalized
-			reqStep()                                  // we may be able to mark more core data as finalized now
 		}
 
 		select {
@@ -512,6 +506,10 @@ func (s *Driver) OverrideLeader(ctx context.Context) error {
 
 func (s *Driver) ConductorEnabled(ctx context.Context) (bool, error) {
 	return s.sequencer.ConductorEnabled(ctx), nil
+}
+
+func (s *Driver) SetEpochInfoGetter(getter engine.EpochInfoGetter) {
+	s.Engine.SetEpochInfoGetter(getter)
 }
 
 func (s *Driver) SetRecoverMode(ctx context.Context, mode bool) error {

@@ -86,6 +86,8 @@ type OpNode struct {
 
 	// Current epoch schedule for determining block producer
 	currentEpochSchedule *pos.EpochSchedule
+	// Historical epoch schedules (max 5) for calculating safe and finalized blocks
+	epochScheduleHistory []*pos.EpochSchedule
 	epochScheduleMu      gosync.RWMutex
 
 	// some resources cannot be stopped directly, like the p2p gossipsub router (not our design),
@@ -258,6 +260,8 @@ func (n *OpNode) initL2(ctx context.Context, cfg *Config) error {
 
 	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.elClient, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, managedMode, cfg.Driver.MaxRequestsPerBatch)
 
+	n.l2Driver.SetEpochInfoGetter(n)
+
 	if cfg.ManagerURL != "" {
 		n.posEmitter = n.eventSys.Register("pos-manager", nil, event.DefaultRegisterOpts())
 	}
@@ -429,6 +433,22 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 
 		// Store current epoch schedule for determining block producer
 		n.epochScheduleMu.Lock()
+		if n.currentEpochSchedule != nil {
+			found := false
+			for _, hist := range n.epochScheduleHistory {
+				if hist.Epoch == n.currentEpochSchedule.Epoch {
+					found = true
+					break
+				}
+			}
+			if !found {
+				n.epochScheduleHistory = append(n.epochScheduleHistory, n.currentEpochSchedule)
+				const maxHistorySize = 5
+				if len(n.epochScheduleHistory) > maxHistorySize {
+					n.epochScheduleHistory = n.epochScheduleHistory[1:]
+				}
+			}
+		}
 		n.currentEpochSchedule = &schedule
 		n.epochScheduleMu.Unlock()
 
@@ -1033,4 +1053,24 @@ func (n *OpNode) getP2PNodeIfEnabled() *p2p.NodeP2P {
 	n.p2pMu.Lock()
 	defer n.p2pMu.Unlock()
 	return n.p2pNode
+}
+
+func (n *OpNode) GetEpochForBlock(blockNumber uint64) (epoch uint64, startBlock uint64, endBlock uint64, found bool) {
+	n.epochScheduleMu.RLock()
+	defer n.epochScheduleMu.RUnlock()
+
+	if n.currentEpochSchedule != nil {
+		if blockNumber >= n.currentEpochSchedule.StartBlock && blockNumber <= n.currentEpochSchedule.EndBlock {
+			return n.currentEpochSchedule.Epoch, n.currentEpochSchedule.StartBlock, n.currentEpochSchedule.EndBlock, true
+		}
+	}
+
+	for i := len(n.epochScheduleHistory) - 1; i >= 0; i-- {
+		hist := n.epochScheduleHistory[i]
+		if hist != nil && blockNumber >= hist.StartBlock && blockNumber <= hist.EndBlock {
+			return hist.Epoch, hist.StartBlock, hist.EndBlock, true
+		}
+	}
+
+	return 0, 0, 0, false
 }

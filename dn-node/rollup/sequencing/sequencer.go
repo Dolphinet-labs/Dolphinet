@@ -353,7 +353,7 @@ func (d *Sequencer) onSequencerAction(SequencerActionEvent) {
 			d.emitter.Emit(engine.BuildSealEvent{
 				Info:         d.latest.Info,
 				BuildStarted: d.latest.Started,
-				Concluding:   true,
+				Concluding:   false,
 			})
 		} else if d.latest == (BuildingState{}) {
 			// In PoS mode, before building a block, request a forkchoice update
@@ -556,7 +556,7 @@ func (d *Sequencer) startBuildingBlock() {
 	withParent := &derive.AttributesWithParent{
 		Attributes: attrs,
 		Parent:     l2Head,
-		Concluding: true, // todo: after vote change Concluding from false to true
+		Concluding: false,
 	}
 
 	// Don't try to start building a block again, until we have heard back from this attempt

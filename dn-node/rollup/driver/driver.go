@@ -83,6 +83,7 @@ type EngineController interface {
 	InsertUnsafePayload(ctx context.Context, payload *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
 	TryUpdateEngine(ctx context.Context) error
 	TryBackupUnsafeReorg(ctx context.Context) (bool, error)
+	SetEpochInfoGetter(getter engine.EpochInfoGetter)
 }
 
 type CLSync interface {
@@ -169,7 +170,7 @@ func NewDriver(
 	statusTracker := status.NewStatusTracker(log, metrics)
 	sys.Register("status", statusTracker, opts)
 
-	ec := engine.NewEngineController(l2, log, metrics, cfg, syncCfg,
+	ec := engine.NewEngineController(l2, elClient, log, metrics, cfg, syncCfg,
 		sys.Register("engine-controller", nil, opts))
 
 	sys.Register("engine-reset",
