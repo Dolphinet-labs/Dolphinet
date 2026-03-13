@@ -119,6 +119,15 @@ contract DolphinetGovernance is
         _removeFromSet(blockVoters, op, RankRole.BLOCK_VOTER);
         _removeFromSet(standbyValidators, op, RankRole.STANDBY);
 
+        // Remove from candidateList
+        for (uint256 i = 0; i < candidateList.length; i++) {
+            if (candidateList[i] == op) {
+                candidateList[i] = candidateList[candidateList.length - 1];
+                candidateList.pop();
+                break;
+            }
+        }
+
         // Clear role lookup
         roleOf[op] = RankRole.NONE;
         indexOf[op] = 0;
@@ -400,11 +409,12 @@ contract DolphinetGovernance is
         // Build a quick in-memory mark for ranked addresses
         // NOTE: We avoid storage writes for marking; we just check roleOf after pushing top ranks.
         // Any candidate with roleOf == NONE is out-of-rank and should be force-unregistered.
-        for (uint256 i = 0; i < candidateList.length; i++) {
+        for (uint256 i = 0; i < candidateList.length; ) {
             address op = candidateList[i];
 
             // If ranked (validator/blockVoter/standby), keep it
             if (roleOf[op] != RankRole.NONE) {
+                i++;
                 continue;
             }
 
@@ -416,16 +426,10 @@ contract DolphinetGovernance is
                 emit ForceUnregisterFailed(eid, op);
             }
 
-            // Remove from governance candidate list as well (optional but matches your boss requirement)
-            // Note: this will mutate candidateList (swap & pop), so we should not increment i blindly.
+            // Remove from governance candidate list as well
             _removeCandidate(op);
-
-            // Since _removeCandidate swaps the last element into current index, we decrement i to re-check the swapped-in item.
-            if (i > 0) {
-                unchecked {
-                    i -= 1;
-                }
-            }
+            // No increment of i: the last element was swapped into current index i,
+            // so we must check the new candidateList[i] in the next iteration.
         }
     }
 
