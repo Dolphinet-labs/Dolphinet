@@ -20,4 +20,6 @@ abstract contract SlashingManagerStorage is ISlashingManager {
     mapping(address => uint256) public slashingOperatorShares;
 
     mapping(address => uint256) public slashingStakerShares;
+
+    uint256[100] private __gap;
 }

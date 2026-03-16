@@ -5,7 +5,7 @@ import "@openzeppelin-upgrades/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelin-upgrades/contracts/access/OwnableUpgradeable.sol";
 import "@openzeppelin-upgrades/contracts/utils/ReentrancyGuardUpgradeable.sol";
 
-import "./FdChainDepositManagerStorage.sol";
+import "./ChainDepositManagerStorage.sol";
 import "../../libraries/EIP1271SignatureUtils.sol";
 import "@/access/Pausable.sol";
 
@@ -36,6 +36,8 @@ contract FdChainDepositManager is
         _DOMAIN_SEPARATOR = _calculateDomainSeparator();
         __Ownable_init(initialOwner);
         _initFdChainDepositManagerStorage(_delegation, _FdChainBase);
+
+        ORIGINAL_CHAIN_ID = block.chainid;
     }
 
     receive() external payable {}

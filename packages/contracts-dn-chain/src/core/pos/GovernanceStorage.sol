@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "../../interfaces/IDelegationManager.sol";
+import "../../interfaces/ISlashingManager.sol";
 
 contract GovernanceStorage {
     // ===== Core Parameters =====
@@ -66,6 +67,10 @@ contract GovernanceStorage {
     }
     mapping(address => RankRole) internal roleOf;
     mapping(address => uint256) internal indexOf; // index in its array (validators/blockVoters/standbyValidators)
+
+    mapping(address => uint256) public voterLockedBalance;
+
+    ISlashingManager public slashingManager;
 
     uint256[45] private __gap;
 }

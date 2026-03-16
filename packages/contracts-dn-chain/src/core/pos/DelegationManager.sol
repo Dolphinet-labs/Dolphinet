@@ -44,6 +44,11 @@ contract DelegationManager is
         _;
     }
 
+    modifier onlyGovernance() {
+        require(msg.sender == address(governance), "onlyGovernance");
+        _;
+    }
+
     constructor() {
         _disableInitializers();
     }
@@ -87,6 +92,11 @@ contract DelegationManager is
             _operatorDetails[msg.sender].earningsReceiver == address(0),
             "DelegationManager.registerAsOperator: operator has already registered"
         );
+        // require(
+        //     fdChainBase.userUnderlying(msg.sender) > 320000 * 1e18,
+        //     "no enough deposit in chainbase"
+        // );
+
         _setOperatorDetails(msg.sender, registeringOperatorDetails);
         SignatureWithExpiry memory emptySignatureAndExpiry;
         _delegate(msg.sender, msg.sender, emptySignatureAndExpiry, bytes32(0));
@@ -121,7 +131,7 @@ contract DelegationManager is
         emit OperatorUnregistered(msg.sender);
     }
 
-    function unRegisterFromGovernance(address op) external {
+    function unRegisterFromGovernance(address op) external onlyGovernance {
         require(
             isOperator(op),
             "DelegationManager.unRegisterFromGovernance: op must be an operator "

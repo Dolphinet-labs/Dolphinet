@@ -218,4 +218,9 @@ interface IDelegationManager is ISignatureUtils {
     ) external view returns (address[] memory);
 
     function unRegisterFromGovernance(address op) external;
+
+    function fdChainDepositManager()
+        external
+        view
+        returns (IFdChainDepositManager);
 }

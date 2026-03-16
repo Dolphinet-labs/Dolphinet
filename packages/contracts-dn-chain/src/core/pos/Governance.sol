@@ -29,7 +29,7 @@ import "../../interfaces/IGovernance.sol";
  *  - Vote power = 1 per address (can be enhanced later)
  */
 
-abstract contract DolphinetGovernance is
+contract DolphinetGovernance is
     Initializable,
     OwnableUpgradeable,
     GovernanceStorage,
@@ -37,11 +37,13 @@ abstract contract DolphinetGovernance is
 {
     function initialize(
         address _manager,
-        address _delegationManager
+        address _delegationManager,
+        address _slashingManager
     ) public initializer {
         __Ownable_init(msg.sender);
         manager = _manager;
         delegationManager = IDelegationManager(_delegationManager);
+        slashingManager = ISlashingManager(_slashingManager);
         lastElectionTime = block.timestamp - ELECTION_INTERVAL; // Allow immediate election start
 
         electionFinalized = false;
@@ -62,13 +64,22 @@ abstract contract DolphinetGovernance is
      * Requires staking native DOL within allowed range.
      */
     function registerCandidate() external {
-        require(!candidates[msg.sender].exists, "already candidate");
+        require(
+            !candidates[msg.sender].exists ||
+                candidates[msg.sender].lastElectionId < currentElectionId,
+            "already candidate"
+        );
 
         // requireing candidate to have delegated shares(as operator)
         uint256 shares = delegationManager.getOperatorShares(msg.sender);
         require(
             shares > 0,
             "Governance.registerCandidate: operator has no shares delegated"
+        );
+
+        require(
+            slashingManager.isOperatorJail(msg.sender) == false,
+            "operator is jailed"
         );
 
         Candidate storage c = candidates[msg.sender];
@@ -108,6 +119,15 @@ abstract contract DolphinetGovernance is
         _removeFromSet(blockVoters, op, RankRole.BLOCK_VOTER);
         _removeFromSet(standbyValidators, op, RankRole.STANDBY);
 
+        // Remove from candidateList
+        for (uint256 i = 0; i < candidateList.length; i++) {
+            if (candidateList[i] == op) {
+                candidateList[i] = candidateList[candidateList.length - 1];
+                candidateList.pop();
+                break;
+            }
+        }
+
         // Clear role lookup
         roleOf[op] = RankRole.NONE;
         indexOf[op] = 0;
@@ -137,15 +157,15 @@ abstract contract DolphinetGovernance is
         // Clear previous sets and role lookups
         _clearRankedSets();
 
-        for (uint256 i = 0; i < candidateList.length; i++) {
-            address op = candidateList[i];
-            Candidate storage c = candidates[op];
+        // for (uint256 i = 0; i < candidateList.length; i++) {
+        //     address op = candidateList[i];
+        //     Candidate storage c = candidates[op];
 
-            c.votes = 0;
-            c.lastElectionId = currentElectionId;
-            c.isValidator = false;
-            c.isBlockVoter = false;
-        }
+        //     c.votes = 0;
+        //     c.lastElectionId = currentElectionId;
+        //     c.isValidator = false;
+        //     c.isBlockVoter = false;
+        // }
 
         emit ElectionStarted(currentElectionId, block.timestamp);
     }
@@ -158,15 +178,15 @@ abstract contract DolphinetGovernance is
         finalizedElectionId = 0;
         _clearRankedSets();
 
-        for (uint256 i = 0; i < candidateList.length; i++) {
-            address op = candidateList[i];
-            Candidate storage c = candidates[op];
+        // for (uint256 i = 0; i < candidateList.length; i++) {
+        //     address op = candidateList[i];
+        //     Candidate storage c = candidates[op];
 
-            c.votes = 0;
-            c.lastElectionId = currentElectionId;
-            c.isValidator = false;
-            c.isBlockVoter = false;
-        }
+        //     c.votes = 0;
+        //     c.lastElectionId = currentElectionId;
+        //     c.isValidator = false;
+        //     c.isBlockVoter = false;
+        // }
 
         emit ElectionStarted(currentElectionId, block.timestamp);
     }
@@ -176,23 +196,49 @@ abstract contract DolphinetGovernance is
      * One address = one vote.
      * Voter must hold sufficient DOL balance.
      */
-    function vote(address candidateOp) external {
-        require(
-            msg.sender.balance >= MIN_VOTER_BALANCE,
-            "insufficient voting balance"
-        );
+    function vote(address candidateOp) external payable {
+        require(msg.value >= MIN_VOTER_BALANCE, "insufficient voting balance");
 
         uint256 eid = currentElectionId;
         require(eid > 0, "election not started");
         require(!hasVoted[eid][msg.sender], "already voted");
 
         Candidate storage c = candidates[candidateOp];
-        require(c.exists, "not candidate");
+        require(
+            c.exists && c.lastElectionId == currentElectionId,
+            "not a valid candidate"
+        );
 
+        // Lock the voting balance for this voter
+        voterLockedBalance[msg.sender] += msg.value;
+
+        // Mark the voter as having voted
         hasVoted[eid][msg.sender] = true;
+
+        // Update the candidate's vote count
         c.votes += 1;
 
         emit Voted(eid, msg.sender, candidateOp);
+    }
+
+    /**
+     * Claim the locked voting balance.
+     * Voter can claim the locked funds after the election.
+     */
+    function claim() external {
+        require(electionFinalized, "cannot claim before election finalized");
+
+        uint256 lockedAmount = voterLockedBalance[msg.sender];
+        require(lockedAmount > 0, "no balance to claim");
+
+        // Reset the locked balance
+        voterLockedBalance[msg.sender] = 0;
+
+        // Transfer the locked amount back to the voter
+        (bool sent, ) = msg.sender.call{value: lockedAmount}("");
+        require(sent, "transfer failed");
+
+        emit VoterClaimed(msg.sender, lockedAmount);
     }
 
     /**
@@ -363,11 +409,12 @@ abstract contract DolphinetGovernance is
         // Build a quick in-memory mark for ranked addresses
         // NOTE: We avoid storage writes for marking; we just check roleOf after pushing top ranks.
         // Any candidate with roleOf == NONE is out-of-rank and should be force-unregistered.
-        for (uint256 i = 0; i < candidateList.length; i++) {
+        for (uint256 i = 0; i < candidateList.length; ) {
             address op = candidateList[i];
 
             // If ranked (validator/blockVoter/standby), keep it
             if (roleOf[op] != RankRole.NONE) {
+                i++;
                 continue;
             }
 
@@ -379,16 +426,10 @@ abstract contract DolphinetGovernance is
                 emit ForceUnregisterFailed(eid, op);
             }
 
-            // Remove from governance candidate list as well (optional but matches your boss requirement)
-            // Note: this will mutate candidateList (swap & pop), so we should not increment i blindly.
+            // Remove from governance candidate list as well
             _removeCandidate(op);
-
-            // Since _removeCandidate swaps the last element into current index, we decrement i to re-check the swapped-in item.
-            if (i > 0) {
-                unchecked {
-                    i -= 1;
-                }
-            }
+            // No increment of i: the last element was swapped into current index i,
+            // so we must check the new candidateList[i] in the next iteration.
         }
     }
 
@@ -547,7 +588,7 @@ abstract contract DolphinetGovernance is
 
     // ================= VIEW HELPERS =================
 
-    function getValidators() external view returns (address[] memory) {
+    function getValidators() public view returns (address[] memory) {
         return validators;
     }
 
@@ -578,5 +619,20 @@ abstract contract DolphinetGovernance is
             all[validators.length + j] = blockVoters[j];
         }
         return all;
+    }
+
+    function getValidatorsShares()
+        external
+        view
+        returns (address[] memory, uint256[] memory)
+    {
+        uint256 len = validators.length;
+        uint256[] memory shares = new uint256[](len);
+        address[] memory validators = getValidators();
+
+        for (uint256 i = 0; i < len; i++) {
+            shares[i] = delegationManager.getOperatorShares(validators[i]);
+        }
+        return (validators, shares);
     }
 }
