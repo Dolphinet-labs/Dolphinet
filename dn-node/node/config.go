@@ -79,6 +79,10 @@ type Config struct {
 	FetchWithdrawalRootFromState    bool
 
 	ManagerURL string
+
+	PoSActivationBlock uint64
+
+	LegacySequencerAddress common.Address
 }
 
 // ConductorRPCFunc retrieves the endpoint. The RPC may not immediately be available.

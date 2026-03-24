@@ -47,12 +47,18 @@ type ManagerClient struct {
 	onVoteReward      func(reward VoteRewardMessage) error
 	onVoteRequest     func(request VoteRequestMessage) error
 	onRegisterAck     func(status string) error
+	onBootnodesUpdate func(bootnodes []string) error
+
+	bootnodesProvider func() []string
 
 	currentBlockNumber uint64
 	currentEpoch       uint64
 	fallbackMode       bool
 	lastHeartbeat      time.Time
 	stateMu            sync.RWMutex
+
+	registeredThisSession bool
+	registeredMu          sync.Mutex
 }
 
 // NewManagerClient creates a new manager client
@@ -97,6 +103,16 @@ func (c *ManagerClient) SetOnVoteRequest(fn func(request VoteRequestMessage) err
 // SetOnRegisterAck sets the register ack callback
 func (c *ManagerClient) SetOnRegisterAck(fn func(status string) error) {
 	c.onRegisterAck = fn
+}
+
+// SetOnBootnodesUpdate sets the bootnodes update callback.
+func (c *ManagerClient) SetOnBootnodesUpdate(fn func(bootnodes []string) error) {
+	c.onBootnodesUpdate = fn
+}
+
+// SetBootnodesProvider sets a function that returns ENR/enode records to include in registration.
+func (c *ManagerClient) SetBootnodesProvider(fn func() []string) {
+	c.bootnodesProvider = fn
 }
 
 // Start starts the client and begins connection and reconnection loop
@@ -192,10 +208,9 @@ func (c *ManagerClient) connect(ctx context.Context) error {
 	c.connMu.Unlock()
 
 	c.log.Info("Connected to manager")
-
-	if err := c.registerNode(); err != nil {
-		c.log.Warn("Failed to register node", "err", err)
-	}
+	c.registeredMu.Lock()
+	c.registeredThisSession = false
+	c.registeredMu.Unlock()
 
 	return nil
 }
@@ -477,6 +492,18 @@ func (c *ManagerClient) handleMessage(data []byte) error {
 			}
 		}
 
+	case MessageTypeBootnodesUpdate:
+		var msg BootnodesUpdateMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return fmt.Errorf("failed to unmarshal bootnodes update: %w", err)
+		}
+		c.log.Info("Received bootnodes update from manager", "count", len(msg.Bootnodes))
+		if c.onBootnodesUpdate != nil {
+			if err := c.onBootnodesUpdate(msg.Bootnodes); err != nil {
+				return fmt.Errorf("bootnodes update callback error: %w", err)
+			}
+		}
+
 	default:
 		c.log.Debug("Unknown message type", "type", base.Type)
 	}
@@ -484,15 +511,27 @@ func (c *ManagerClient) handleMessage(data []byte) error {
 	return nil
 }
 
-func (c *ManagerClient) registerNode() error {
+func (c *ManagerClient) RegisterWithBlockNumber(nextBlockNumber uint64) error {
 	if c.validatorAddr == (common.Address{}) {
 		c.log.Warn("Validator address not set, skipping registration")
 		return nil
 	}
+	c.registeredMu.Lock()
+	if c.registeredThisSession {
+		c.registeredMu.Unlock()
+		return nil
+	}
+	c.registeredMu.Unlock()
 
+	var bootnodes []string
+	if c.bootnodesProvider != nil {
+		bootnodes = c.bootnodesProvider()
+	}
 	msg := NodeRegisterMessage{
-		Type:    MessageTypeNodeRegister,
-		Address: c.validatorAddr,
+		Type:               MessageTypeNodeRegister,
+		Address:            c.validatorAddr,
+		CurrentBlockNumber: nextBlockNumber,
+		Bootnodes:          bootnodes,
 	}
 
 	data, err := json.Marshal(msg)
@@ -500,8 +539,26 @@ func (c *ManagerClient) registerNode() error {
 		return fmt.Errorf("failed to marshal register message: %w", err)
 	}
 
-	c.log.Info("Registering node with manager", "address", c.validatorAddr.Hex())
-	return c.sendMessage(data)
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	c.writeMu.Lock()
+	conn.SetWriteDeadline(time.Now().Add(writeWait))
+	err = conn.WriteMessage(gorillaWS.TextMessage, data)
+	c.writeMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	c.registeredMu.Lock()
+	c.registeredThisSession = true
+	c.registeredMu.Unlock()
+	c.log.Info("Registered node with manager", "address", c.validatorAddr.Hex(), "next_block_number", nextBlockNumber)
+	return nil
 }
 
 func (c *ManagerClient) SendValidatorStatus(blockNumber uint64, status string) error {

@@ -398,6 +398,26 @@ var (
 		Value:    false,
 		Category: SequencerCategory,
 	}
+	PoSActivationBlockFlag = &cli.Uint64Flag{
+		Name:     "pos.activation-block",
+		Usage:    "First block number at which PoS rules apply (Manager scheduling). 0 = PoS from genesis. Used for chain upgrade.",
+		EnvVars:  prefixEnvVars("POS_ACTIVATION_BLOCK"),
+		Value:    0,
+		Category: SequencerCategory,
+	}
+	LegacySequencerFlag = &cli.BoolFlag{
+		Name:     "pos.legacy-sequencer",
+		Usage:    "If set, this node is the single sequencer before pos.activation-block; other nodes only sync. Set only on the node that has the pre-upgrade chain.",
+		EnvVars:  prefixEnvVars("POS_LEGACY_SEQUENCER"),
+		Value:    false,
+		Category: SequencerCategory,
+	}
+	LegacySequencerAddressFlag = &cli.StringFlag{
+		Name:     "pos.legacy-sequencer-address",
+		Usage:    "Ethereum address of the legacy sequencer (e.g. validator1). When set on a non-legacy node, P2P accepts blocks from this address for syncing before PoS activation.",
+		EnvVars:  prefixEnvVars("POS_LEGACY_SEQUENCER_ADDRESS"),
+		Category: SequencerCategory,
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -445,6 +465,9 @@ var optionalFlags = []cli.Flag{
 	IgnoreMissingPectraBlobSchedule,
 	ManagerURLFlag,
 	PosModeEnabledFlag,
+	PoSActivationBlockFlag,
+	LegacySequencerFlag,
+	LegacySequencerAddressFlag,
 }
 
 var DeprecatedFlags = []cli.Flag{

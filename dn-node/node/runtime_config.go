@@ -62,6 +62,8 @@ type runtimeConfigData struct {
 	// In PoS mode, multiple validators can produce blocks, so we need to accept blocks from all of them.
 	p2pAllowedSequencerAddrs []common.Address
 
+	legacySequencerAddr common.Address
+
 	// superchain protocol version signals
 	recommended params.ProtocolVersion
 	required    params.ProtocolVersion
@@ -85,16 +87,25 @@ func (r *RuntimeConfig) P2PSequencerAddress() common.Address {
 func (r *RuntimeConfig) P2PAllowedSequencerAddresses() []common.Address {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	// Return a copy to prevent external modifications
-	if len(r.p2pAllowedSequencerAddrs) == 0 {
-		// Fallback to single address for backward compatibility
-		if r.p2pBlockSignerAddr != (common.Address{}) {
-			return []common.Address{r.p2pBlockSignerAddr}
-		}
-		return nil
+	var result []common.Address
+	if len(r.p2pAllowedSequencerAddrs) > 0 {
+		result = make([]common.Address, len(r.p2pAllowedSequencerAddrs))
+		copy(result, r.p2pAllowedSequencerAddrs)
+	} else if r.p2pBlockSignerAddr != (common.Address{}) {
+		result = []common.Address{r.p2pBlockSignerAddr}
 	}
-	result := make([]common.Address, len(r.p2pAllowedSequencerAddrs))
-	copy(result, r.p2pAllowedSequencerAddrs)
+	if r.legacySequencerAddr != (common.Address{}) {
+		has := false
+		for _, a := range result {
+			if a == r.legacySequencerAddr {
+				has = true
+				break
+			}
+		}
+		if !has {
+			result = append(result, r.legacySequencerAddr)
+		}
+	}
 	return result
 }
 
@@ -126,6 +137,15 @@ func (r *RuntimeConfig) Load(ctx context.Context, p2pSignerAddress common.Addres
 	r.recommended = params.ProtocolVersion(common.HexToHash("0x1"))
 	r.log.Info("loaded new runtime config values!", "p2p_seq_address", r.p2pBlockSignerAddr)
 	return nil
+}
+
+func (r *RuntimeConfig) SetLegacySequencerAddress(addr common.Address) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.legacySequencerAddr = addr
+	if addr != (common.Address{}) {
+		r.log.Info("set legacy sequencer address for P2P allowed list", "addr", addr)
+	}
 }
 
 // UpdateAllowedSequencerAddresses updates the list of allowed sequencer addresses.

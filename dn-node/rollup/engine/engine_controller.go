@@ -633,27 +633,38 @@ func (e *EngineController) calculateSafeAndFinalized(ctx context.Context, curren
 
 			finalizedRefFromRPC, err := e.elClient.BlockRefByLabel(ctx, eth.Finalized)
 			if err != nil {
-				e.log.Debug("Failed to get finalized block from validator via RPC, using current block", "err", err)
+				e.log.Debug("Failed to get finalized block from validator via RPC, keeping existing finalized", "err", err)
 				if e.finalizedHead != (eth.L2BlockRef{}) {
 					finalizedRef = e.finalizedHead
-				} else {
-					finalizedRef = currentRef
+					return safeRef, finalizedRef, true, false
 				}
-			} else {
-				finalizedRef = eth.L2BlockRef{
-					Hash:           finalizedRefFromRPC.Hash,
-					Number:         finalizedRefFromRPC.Number,
-					ParentHash:     finalizedRefFromRPC.ParentHash,
-					Time:           finalizedRefFromRPC.Time,
-					SequenceNumber: 0,
-				}
-				e.log.Debug("Got finalized block from validator via RPC", "finalized_block", finalizedRef.Number)
+				finalizedRef = e.finalizedHead
+				return safeRef, finalizedRef, true, false
 			}
-
+			finalizedRef = eth.L2BlockRef{
+				Hash:           finalizedRefFromRPC.Hash,
+				Number:         finalizedRefFromRPC.Number,
+				ParentHash:     finalizedRefFromRPC.ParentHash,
+				Time:           finalizedRefFromRPC.Time,
+				SequenceNumber: 0,
+			}
+			if finalizedRef.Number >= currentBlockNum {
+				e.log.Debug("RPC finalized block is ahead of current block, keeping existing finalized",
+					"finalized_from_rpc", finalizedRef.Number, "current_block", currentBlockNum)
+				if e.finalizedHead != (eth.L2BlockRef{}) {
+					finalizedRef = e.finalizedHead
+				}
+				return safeRef, finalizedRef, true, false
+			}
+			e.log.Debug("Got finalized block from validator via RPC", "finalized_block", finalizedRef.Number)
 			return safeRef, finalizedRef, true, true
-		} else {
-			return currentRef, currentRef, true, true
 		}
+		e.log.Debug("No epoch info and no elClient, skipping finalized update to avoid invalid state")
+		finalizedRef = e.finalizedHead
+		if finalizedRef == (eth.L2BlockRef{}) {
+			finalizedRef = currentRef
+		}
+		return currentRef, finalizedRef, true, false
 	}
 
 	shouldUpdateSafe = currentEpoch >= 1

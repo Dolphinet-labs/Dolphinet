@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -151,6 +152,8 @@ func (n *NodeP2P) init(
 			// register the sync protocol with libp2p host
 			payloadByNumber := MakeStreamHandler(resourcesCtx, log.New("serve", "payloads_by_number"), n.syncSrv.HandleSyncRequest)
 			n.host.SetStreamHandler(PayloadByNumberProtocolID(rollupCfg.L2ChainID), payloadByNumber)
+			l2Head := MakeStreamHandler(resourcesCtx, log.New("serve", "l2_head"), n.syncSrv.HandleL2HeadRequest)
+			n.host.SetStreamHandler(L2HeadProtocolID(rollupCfg.L2ChainID), l2Head)
 		}
 	}
 	n.scorer = NewScorer(rollupCfg, eps, metrics, n.appScorer, log)
@@ -212,6 +215,30 @@ func (n *NodeP2P) Dv5Local() *enode.LocalNode {
 
 func (n *NodeP2P) Dv5Udp() *discover.UDPv5 {
 	return n.dv5Udp
+}
+
+func (n *NodeP2P) AddDiscv5Bootnodes(records []string) (added int, err error) {
+	if n.dv5Udp == nil {
+		return 0, nil
+	}
+	for _, rec := range records {
+		rec = strings.TrimSpace(rec)
+		if rec == "" {
+			continue
+		}
+		nodeRecord, parseErr := enode.Parse(enode.ValidSchemes, rec)
+		if parseErr != nil {
+			err = multierror.Append(err, fmt.Errorf("invalid bootnode record %q: %w", rec, parseErr))
+			continue
+		}
+		if n.dv5Udp.AddKnownNode(nodeRecord) {
+			added++
+		}
+	}
+	if added > 0 {
+		n.log.Info("Added discv5 bootnodes", "added", added, "total_records", len(records))
+	}
+	return added, err
 }
 
 func (n *NodeP2P) GossipSub() *pubsub.PubSub {

@@ -210,6 +210,9 @@ func (n *OpNode) initRuntimeConfig(ctx context.Context, cfg *Config) error {
 		n.log.Error("failed to fetch runtime config data", "err", err)
 		return err
 	}
+	if cfg.LegacySequencerAddress != (common.Address{}) {
+		n.runCfg.SetLegacySequencerAddress(cfg.LegacySequencerAddress)
+	}
 	return nil
 }
 
@@ -258,7 +261,11 @@ func (n *OpNode) initL2(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("cfg.Rollup.ChainOpConfig is nil. Please see https://github.com/dolphinnet-labs/dolphinnet/releases/tag/dn-node/v1.11.0: %w", err)
 	}
 
-	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.elClient, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, managedMode, cfg.Driver.MaxRequestsPerBatch)
+	var blockProducerChecker sequencing.BlockProducerChecker
+	if cfg.Driver.PosMode {
+		blockProducerChecker = n
+	}
+	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.elClient, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, managedMode, cfg.Driver.MaxRequestsPerBatch, blockProducerChecker)
 
 	n.l2Driver.SetEpochInfoGetter(n)
 
@@ -358,7 +365,8 @@ func (n *OpNode) initP2P(cfg *Config) (err error) {
 	}
 	if n.p2pEnabled() {
 		// TODO(protocol-quest#97): Use EL Sync instead of CL Alt sync for fetching missing blocks in the payload queue.
-		n.p2pNode, err = p2p.NewNodeP2P(n.resourcesCtx, &cfg.Rollup, n.log, cfg.P2P, n, n.l2Source, n.runCfg, n.metrics, false)
+		l2ChainForP2P := &p2pL2ChainAdapter{EngineClient: n.l2Source}
+		n.p2pNode, err = p2p.NewNodeP2P(n.resourcesCtx, &cfg.Rollup, n.log, cfg.P2P, n, l2ChainForP2P, n.runCfg, n.metrics, false)
 		if err != nil {
 			return
 		}
@@ -392,11 +400,42 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 	// Use P2PSignerAddress as validator address
 	client := pos.NewManagerClient(cfg.ManagerURL, cfg.P2PSignerAddress, n.log)
 
+	client.SetBootnodesProvider(func() []string {
+		p2pNode := n.getP2PNodeIfEnabled()
+		if p2pNode == nil || p2pNode.Dv5Udp() == nil {
+			return nil
+		}
+		self := p2pNode.Dv5Udp().Self()
+		if self == nil {
+			return nil
+		}
+		return []string{self.String()}
+	})
+
+	client.SetOnBootnodesUpdate(func(bootnodes []string) error {
+		p2pNode := n.getP2PNodeIfEnabled()
+		if p2pNode == nil {
+			return nil
+		}
+		added, err := p2pNode.AddDiscv5Bootnodes(bootnodes)
+		if err != nil {
+			n.log.Warn("Failed to add discv5 bootnodes from manager update", "err", err)
+		}
+		if added > 0 {
+			n.log.Info("Imported bootnodes from manager update", "added", added, "count", len(bootnodes))
+		}
+		return nil
+	})
+
 	// Set block assignment callback
 	// Manager only sends to validators that should produce blocks based on scheduler, so receiving a message means we should produce a block
 	// After block production, it will automatically broadcast to other validator nodes via P2P (implemented in PublishL2Payload)
 	// Other validators receive P2P messages via OnUnsafeL2Payload to complete synchronization
 	client.SetOnBlockAssignment(func(assignment pos.BlockAssignment) error {
+		if cfg.PoSActivationBlock != 0 && assignment.BlockNumber < cfg.PoSActivationBlock {
+			n.log.Debug("Ignoring block assignment before PoS activation", "block_number", assignment.BlockNumber, "pos_activation_block", cfg.PoSActivationBlock)
+			return nil
+		}
 		n.log.Info("Received block assignment from manager",
 			"block_number", assignment.BlockNumber,
 			"epoch", assignment.Epoch,
@@ -452,9 +491,7 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 		n.currentEpochSchedule = &schedule
 		n.epochScheduleMu.Unlock()
 
-		// Update allowed sequencer addresses from the epoch schedule
-		// The schedule contains all validator addresses that can produce blocks in this epoch
-		if len(schedule.Validators) > 0 {
+		if len(schedule.Validators) > 0 && (cfg.PoSActivationBlock == 0 || schedule.StartBlock >= cfg.PoSActivationBlock) {
 			validatorAddrs := make([]common.Address, 0, len(schedule.Validators))
 			for addr := range schedule.Validators {
 				validatorAddrs = append(validatorAddrs, addr)
@@ -628,7 +665,38 @@ func (n *OpNode) Start(ctx context.Context) error {
 		return err
 	}
 	log.Info("Rollup node started")
+
+	if n.managerClient != nil {
+		go n.posRegisterLoop(ctx)
+	}
 	return nil
+}
+
+func (n *OpNode) posRegisterLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n.managerClient == nil || !n.managerClient.IsConnected() {
+				continue
+			}
+			status, err := n.l2Driver.SyncStatus(ctx)
+			if err != nil || status == nil {
+				continue
+			}
+			nextBlock := status.UnsafeL2.Number + 1
+			if n.cfg.PoSActivationBlock != 0 && nextBlock < n.cfg.PoSActivationBlock {
+				n.log.Debug("PoS registration deferred until activation height", "next_block", nextBlock, "pos_activation_block", n.cfg.PoSActivationBlock)
+				continue
+			}
+			if err := n.managerClient.RegisterWithBlockNumber(nextBlock); err != nil {
+				n.log.Warn("Failed to register with manager", "err", err)
+			}
+		}
+	}
 }
 
 // onEvent handles broadcast events.
@@ -854,9 +922,27 @@ func (n *OpNode) isCurrentBlockProducer(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+func (n *OpNode) IsBlockProducerFor(nextBlock uint64) bool {
+	if !n.cfg.Driver.PosMode {
+		return false
+	}
+	n.epochScheduleMu.RLock()
+	schedule := n.currentEpochSchedule
+	n.epochScheduleMu.RUnlock()
+	if schedule == nil {
+		return false
+	}
+	for _, assignment := range schedule.Assignments {
+		if assignment.BlockNumber == nextBlock {
+			return assignment.Validator == n.cfg.P2PSignerAddress
+		}
+	}
+	return false
+}
+
 func (n *OpNode) RequestL2Range(ctx context.Context, start, end eth.L2BlockRef) error {
 	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil && p2pNode.AltSyncEnabled() {
-		if unixTimeStale(start.Time, 12*time.Hour) {
+		if start.Number != 0 && unixTimeStale(start.Time, 12*time.Hour) {
 			n.log.Debug(
 				"ignoring request to sync core range, timestamp is too old for p2p",
 				"start", start,

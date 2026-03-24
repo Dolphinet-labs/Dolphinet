@@ -162,6 +162,7 @@ func NewDriver(
 	syncCfg *sync.Config,
 	managedMode bool,
 	batchSize int,
+	blockProducerChecker sequencing.BlockProducerChecker,
 ) *Driver {
 	driverCtx, driverCancel := context.WithCancel(context.Background())
 
@@ -219,7 +220,10 @@ func NewDriver(
 		asyncGossiper := async.NewAsyncGossiper(driverCtx, network, log, metrics)
 		attrBuilder := derive.NewFetchingAttributesBuilder(cfg, l2)
 		sequencer = sequencing.NewSequencer(driverCtx, log, cfg, attrBuilder,
-			sequencerStateListener, asyncGossiper, metrics, driverCfg.PosMode)
+			sequencerStateListener, asyncGossiper, metrics, driverCfg.PosMode, driverCfg.PoSActivationBlock, driverCfg.LegacySequencer)
+		if blockProducerChecker != nil {
+			sequencer.SetBlockProducerChecker(blockProducerChecker)
+		}
 		sys.Register("sequencer", sequencer, opts)
 	} else {
 		sequencer = sequencing.DisabledSequencer{}

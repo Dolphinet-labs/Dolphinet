@@ -18,6 +18,7 @@ const (
 	MessageTypeVoteRewardRequest = "vote_reward_request"
 	MessageTypeBlockVote         = "block_vote"
 	MessageTypeRegisterAck       = "register_ack"
+	MessageTypeBootnodesUpdate   = "bootnodes_update"
 )
 
 // BlockAssignmentMessage block assignment message
@@ -42,8 +43,18 @@ type HeartbeatMessage struct {
 
 // NodeRegisterMessage node registration message (for both validators and voters)
 type NodeRegisterMessage struct {
-	Type    string         `json:"type"`
-	Address common.Address `json:"address"`
+	Type               string         `json:"type"`
+	Address            common.Address `json:"address"`
+	CurrentBlockNumber uint64         `json:"current_block_number,omitempty"` // Next block to produce (L2 unsafe head + 1). Manager uses this when scheduler_start_block is set.
+	// Bootnodes is an optional list of ENR/enode records that other nodes can use to bootstrap discovery.
+	// It is sent during registration so the manager can aggregate and broadcast a network-wide list.
+	Bootnodes []string `json:"bootnodes,omitempty"`
+}
+
+// BootnodesUpdateMessage is broadcast by manager to all nodes to share a merged bootnodes list.
+type BootnodesUpdateMessage struct {
+	Type      string   `json:"type"`
+	Bootnodes []string `json:"bootnodes"`
 }
 
 // ValidatorStatusMessage validator status message

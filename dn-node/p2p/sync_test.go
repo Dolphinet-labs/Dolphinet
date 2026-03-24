@@ -32,6 +32,10 @@ func (fn mockPayloadFn) PayloadByNumber(_ context.Context, number uint64) (*eth.
 	return fn(number)
 }
 
+func (fn mockPayloadFn) L2Head(_ context.Context) (eth.L2BlockRef, error) {
+	return eth.L2BlockRef{}, nil
+}
+
 var _ L2Chain = mockPayloadFn(nil)
 
 type syncTestData struct {

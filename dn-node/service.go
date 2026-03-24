@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/urfave/cli/v2"
 
@@ -111,12 +112,15 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*node.Config, error) {
 		IgnoreMissingPectraBlobSchedule: ctx.Bool(flags.IgnoreMissingPectraBlobSchedule.Name),
 		FetchWithdrawalRootFromState:    ctx.Bool(flags.FetchWithdrawalRootFromState.Name),
 
-		ManagerURL: ctx.String(flags.ManagerURLFlag.Name),
+		ManagerURL:             ctx.String(flags.ManagerURLFlag.Name),
+		PoSActivationBlock:     ctx.Uint64(flags.PoSActivationBlockFlag.Name),
+		LegacySequencerAddress: common.HexToAddress(ctx.String(flags.LegacySequencerAddressFlag.Name)),
 	}
 
 	if err := cfg.LoadPersisted(log); err != nil {
 		return nil, fmt.Errorf("failed to load driver config: %w", err)
 	}
+	cfg.Driver.PoSActivationBlock = cfg.PoSActivationBlock
 
 	// conductor controls the sequencer state
 	if cfg.ConductorEnabled {
@@ -178,6 +182,7 @@ func NewDriverConfig(ctx *cli.Context) *driver.Config {
 		SequencerMaxSafeLag: ctx.Uint64(flags.SequencerMaxSafeLagFlag.Name),
 		RecoverMode:         ctx.Bool(flags.SequencerRecoverMode.Name),
 		PosMode:             ctx.Bool(flags.PosModeEnabledFlag.Name),
+		LegacySequencer:     ctx.Bool(flags.LegacySequencerFlag.Name),
 	}
 }
 

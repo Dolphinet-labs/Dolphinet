@@ -54,4 +54,6 @@ func (ds DisabledSequencer) ConductorEnabled(ctx context.Context) bool {
 
 func (ds DisabledSequencer) SetRecoverMode(mode bool) {}
 
+func (ds DisabledSequencer) SetBlockProducerChecker(checker BlockProducerChecker) {}
+
 func (ds DisabledSequencer) Close() {}
