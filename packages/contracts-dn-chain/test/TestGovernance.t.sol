@@ -39,10 +39,12 @@ contract TestGovernance is Test {
         mockSlashing = new MockSlashingManager();
         
         gov = new DolphinetGovernance();
-        gov.initialize(manager, address(mockDelegation), address(mockSlashing));
-        
-        // Transfer ownership to the test's owner address
-        gov.transferOwnership(owner);
+        gov.initialize(
+            owner,
+            manager,
+            address(mockDelegation),
+            address(mockSlashing)
+        );
         
         for(uint160 i = 10; i < 50; i++) {
             candidatesPool.push(address(i));

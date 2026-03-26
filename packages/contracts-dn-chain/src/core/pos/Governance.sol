@@ -36,11 +36,12 @@ contract DolphinetGovernance is
     IGovernance
 {
     function initialize(
+        address initialOwner,
         address _manager,
         address _delegationManager,
         address _slashingManager
     ) public initializer {
-        __Ownable_init(msg.sender);
+        __Ownable_init(initialOwner);
         manager = _manager;
         delegationManager = IDelegationManager(_delegationManager);
         slashingManager = ISlashingManager(_slashingManager);

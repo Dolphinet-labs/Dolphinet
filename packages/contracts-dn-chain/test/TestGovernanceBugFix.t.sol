@@ -36,8 +36,12 @@ contract TestGovernanceBugFix is Test {
         mockSlashing = new MockSlashingManager();
         
         gov = new DolphinetGovernance();
-        gov.initialize(manager, address(mockDelegation), address(mockSlashing));
-        gov.transferOwnership(owner);
+        gov.initialize(
+            owner,
+            manager,
+            address(mockDelegation),
+            address(mockSlashing)
+        );
     }
 
     function testForceUnregisterLosersBugFix() public {

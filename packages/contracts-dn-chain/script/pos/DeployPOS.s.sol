@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.so
 
 import "../../src/interfaces/IPauserRegistry.sol";
 import "../../src/interfaces/IFdChainDepositManager.sol";
-
+                       
 import {EmptyContract} from "../utils/EmptyContract.sol";
 import {FdChainBase} from "../../src/core/pos/ChainBase.sol";
 import {FdChainDepositManager} from "../../src/core/pos/ChainDepositManager.sol";
@@ -24,9 +24,7 @@ contract DeployerCpChainBridge is Script {
     FdChainBase public chainBase;
     FdChainBase public chainBaseImplementation;
 
-    ProxyAdmin public pauserRegistryProxyAdmin;
     PauserRegistry public pauserRegistry;
-    PauserRegistry public pauserRegistryImplementation;
 
     ProxyAdmin public chainDepositManagerProxyAdmin;
     FdChainDepositManager public chainDepositManager;
@@ -54,6 +52,8 @@ contract DeployerCpChainBridge is Script {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         // uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployerAddress = vm.addr(deployerPrivateKey);
+        address slasherAddress = deployerAddress;
+        address slashingRecipient = deployerAddress;
 
         pausers = [deployerAddress, deployerAddress];
 
@@ -85,18 +85,9 @@ contract DeployerCpChainBridge is Script {
             getProxyAdminAddress(address(proxyChainDepositManager))
         );
 
-        TransparentUpgradeableProxy proxyPauserRegistry = new TransparentUpgradeableProxy(
-                address(emptyContract),
-                deployerAddress,
-                ""
-            );
-        pauserRegistry = PauserRegistry(payable(address(proxyPauserRegistry)));
-        pauserRegistryImplementation = new PauserRegistry(
+        pauserRegistry = new PauserRegistry(
             pausers,
             deployerAddress
-        );
-        pauserRegistryProxyAdmin = ProxyAdmin(
-            getProxyAdminAddress(address(proxyPauserRegistry))
         );
 
         TransparentUpgradeableProxy proxyDelegationManager = new TransparentUpgradeableProxy(
@@ -161,20 +152,14 @@ contract DeployerCpChainBridge is Script {
             )
         );
 
-        pauserRegistryProxyAdmin.upgradeAndCall(
-            ITransparentUpgradeableProxy(address(pauserRegistry)),
-            address(pauserRegistryImplementation),
-            ""
-        );
-
         chainDepositManagerProxyAdmin.upgradeAndCall(
             ITransparentUpgradeableProxy(address(chainDepositManager)),
             address(chainDepositManagerImplementation),
             abi.encodeWithSelector(
                 FdChainDepositManager.initialize.selector,
                 deployerAddress,
-                address(chainBase),
-                address(delegationManager)
+                address(delegationManager),
+                address(chainBase)
             )
         );
 
@@ -201,9 +186,9 @@ contract DeployerCpChainBridge is Script {
                 SlashingManager.initialize.selector,
                 deployerAddress,
                 address(delegationManager),
-                address(slashingManager),
+                slasherAddress,
                 0, // min withdrawal amount
-                deployerAddress // slashing recipient
+                slashingRecipient
             )
         );
 
@@ -212,8 +197,10 @@ contract DeployerCpChainBridge is Script {
             address(governanceManagerImplementation),
             abi.encodeWithSelector(
                 DolphinetGovernance.initialize.selector,
+                deployerAddress,
+                deployerAddress,
                 address(delegationManager),
-                address(delegationManager)
+                address(slashingManager)
             )
         );
 
@@ -238,14 +225,7 @@ contract DeployerCpChainBridge is Script {
             address(chainBaseImplementation)
         );
 
-        console.log(
-            "deploy proxyPauserRegistry:",
-            address(proxyPauserRegistry)
-        );
-        console.log(
-            "Implementation PauserRegistry:",
-            address(pauserRegistryImplementation)
-        );
+        console.log("deploy PauserRegistry:", address(pauserRegistry));
         console.log(
             "deploy proxyChainDepositManager:",
             address(proxyChainDepositManager)
