@@ -441,9 +441,13 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 			"epoch", assignment.Epoch,
 			"validator", assignment.Validator.Hex())
 
-		// Notify manager that block production has started
-		if err := client.SendValidatorStatus(assignment.BlockNumber, "mining"); err != nil {
-			n.log.Warn("Failed to send validator status", "err", err)
+		if client.IsRegistered() {
+			if err := client.SendValidatorStatus(assignment.BlockNumber, "mining"); err != nil {
+				n.log.Warn("Failed to send validator status", "err", err)
+			}
+		} else {
+			n.log.Debug("Skip mining status before manager registration is acknowledged",
+				"block_number", assignment.BlockNumber)
 		}
 
 		// Trigger sequencer to produce block
@@ -762,11 +766,17 @@ func (n *OpNode) PublishL2Payload(ctx context.Context, envelope *eth.ExecutionPa
 		}
 		n.log.Info("Publishing signed execution payload on p2p", "id", envelope.ID())
 
-		// Notify manager that block production is complete
 		if n.managerClient != nil {
 			blockNumber := uint64(envelope.ExecutionPayload.BlockNumber)
-			if err := n.managerClient.SendValidatorStatus(blockNumber, "done"); err != nil {
-				n.log.Warn("Failed to send done status to manager", "err", err)
+			if (n.cfg.PoSActivationBlock == 0 || blockNumber >= n.cfg.PoSActivationBlock) && n.managerClient.IsRegistered() {
+				if err := n.managerClient.SendValidatorStatus(blockNumber, "done"); err != nil {
+					n.log.Warn("Failed to send done status to manager", "err", err)
+				}
+			} else {
+				n.log.Debug("Skip done status before PoS activation or registration ack",
+					"block_number", blockNumber,
+					"pos_activation_block", n.cfg.PoSActivationBlock,
+					"registered", n.managerClient.IsRegistered())
 			}
 		}
 

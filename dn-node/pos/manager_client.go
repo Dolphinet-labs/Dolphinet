@@ -21,6 +21,7 @@ const (
 	pongWait          = 60 * time.Second
 	pingPeriod        = (pongWait * 9) / 10
 	maxMessageSize    = 512 * 1024
+	registerRetryWait = 5 * time.Second
 )
 
 type ManagerClient struct {
@@ -58,6 +59,8 @@ type ManagerClient struct {
 	stateMu            sync.RWMutex
 
 	registeredThisSession bool
+	registeredAcked       bool
+	registerRequestedAt   time.Time
 	registeredMu          sync.Mutex
 }
 
@@ -210,6 +213,8 @@ func (c *ManagerClient) connect(ctx context.Context) error {
 	c.log.Info("Connected to manager")
 	c.registeredMu.Lock()
 	c.registeredThisSession = false
+	c.registeredAcked = false
+	c.registerRequestedAt = time.Time{}
 	c.registeredMu.Unlock()
 
 	return nil
@@ -222,6 +227,11 @@ func (c *ManagerClient) disconnect() {
 		c.conn = nil
 	}
 	c.connMu.Unlock()
+	c.registeredMu.Lock()
+	c.registeredThisSession = false
+	c.registeredAcked = false
+	c.registerRequestedAt = time.Time{}
+	c.registeredMu.Unlock()
 	c.setConnected(false)
 }
 
@@ -489,6 +499,15 @@ func (c *ManagerClient) handleMessage(data []byte) error {
 		c.log.Info("Received register ack from manager",
 			"address", msg.Address,
 			"status", msg.Status)
+		c.registeredMu.Lock()
+		if msg.Status == "success" {
+			c.registeredAcked = true
+		} else {
+			c.registeredThisSession = false
+			c.registeredAcked = false
+			c.registerRequestedAt = time.Time{}
+		}
+		c.registeredMu.Unlock()
 
 		if c.onRegisterAck != nil {
 			if err := c.onRegisterAck(msg.Status); err != nil {
@@ -521,7 +540,11 @@ func (c *ManagerClient) RegisterWithBlockNumber(nextBlockNumber uint64) error {
 		return nil
 	}
 	c.registeredMu.Lock()
-	if c.registeredThisSession {
+	if c.registeredAcked {
+		c.registeredMu.Unlock()
+		return nil
+	}
+	if c.registeredThisSession && time.Since(c.registerRequestedAt) < registerRetryWait {
 		c.registeredMu.Unlock()
 		return nil
 	}
@@ -560,9 +583,18 @@ func (c *ManagerClient) RegisterWithBlockNumber(nextBlockNumber uint64) error {
 
 	c.registeredMu.Lock()
 	c.registeredThisSession = true
+	c.registeredAcked = false
+	c.registerRequestedAt = time.Now()
 	c.registeredMu.Unlock()
 	c.log.Info("Registered node with manager", "address", c.validatorAddr.Hex(), "next_block_number", nextBlockNumber)
 	return nil
+}
+
+// IsRegistered checks if current session has been acknowledged by manager.
+func (c *ManagerClient) IsRegistered() bool {
+	c.registeredMu.Lock()
+	defer c.registeredMu.Unlock()
+	return c.registeredAcked
 }
 
 func (c *ManagerClient) SendValidatorStatus(blockNumber uint64, status string) error {
