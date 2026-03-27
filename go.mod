@@ -226,7 +226,7 @@ require (
 
 //replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth v1.101503.4-rc.1
 
-replace github.com/ethereum/go-ethereum => ../Dolphinet-geth
+replace github.com/ethereum/go-ethereum => github.com/Dolphinet-labs/Dolphinet-geth v1.2.0
 
 // replace github.com/ethereum-optimism/superchain-registry/superchain => ../superchain-registry/superchain
 
