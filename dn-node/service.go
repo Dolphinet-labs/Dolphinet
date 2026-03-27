@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -70,6 +71,11 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*node.Config, error) {
 		haltOption = ""
 	}
 
+	poSActivationBlock, err := strconv.ParseUint(ctx.String(flags.PoSActivationBlockFlag.Name), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parseUint the pos activation block: %w", err)
+	}
+
 	if ctx.IsSet(flags.HeartbeatEnabledFlag.Name) ||
 		ctx.IsSet(flags.HeartbeatMonikerFlag.Name) ||
 		ctx.IsSet(flags.HeartbeatURLFlag.Name) {
@@ -113,7 +119,7 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*node.Config, error) {
 		FetchWithdrawalRootFromState:    ctx.Bool(flags.FetchWithdrawalRootFromState.Name),
 
 		ManagerURL:             ctx.String(flags.ManagerURLFlag.Name),
-		PoSActivationBlock:     ctx.Uint64(flags.PoSActivationBlockFlag.Name),
+		PoSActivationBlock:     poSActivationBlock,
 		LegacySequencerAddress: common.HexToAddress(ctx.String(flags.LegacySequencerAddressFlag.Name)),
 	}
 

@@ -398,11 +398,11 @@ var (
 		Value:    false,
 		Category: SequencerCategory,
 	}
-	PoSActivationBlockFlag = &cli.Uint64Flag{
+	PoSActivationBlockFlag = &cli.StringFlag{
 		Name:     "pos.activation-block",
 		Usage:    "First block number at which PoS rules apply (Manager scheduling). 0 = PoS from genesis. Used for chain upgrade.",
 		EnvVars:  prefixEnvVars("POS_ACTIVATION_BLOCK"),
-		Value:    0,
+		Value:    "0",
 		Category: SequencerCategory,
 	}
 	LegacySequencerFlag = &cli.BoolFlag{
