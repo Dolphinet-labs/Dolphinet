@@ -342,7 +342,11 @@ func (c *ManagerClient) sendHeartbeat() {
 	}
 
 	if err := c.sendMessage(data); err != nil {
-		c.log.Debug("Failed to send heartbeat", "err", err)
+		// If heartbeat write fails, the connection is likely stale (e.g. manager already
+		// dropped this websocket session). Proactively reconnect to avoid lingering in
+		// a half-open state and repeatedly sending messages to an unknown connection.
+		c.log.Warn("Failed to send heartbeat, forcing reconnect", "err", err)
+		c.disconnect()
 	} else {
 		c.log.Debug("Sent heartbeat to manager", "block", blockNumber, "epoch", epoch)
 	}
