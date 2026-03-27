@@ -25,6 +25,21 @@ type Config struct {
 	// to be compatible with verifiers forcefully generating the same block while catching up the sequencing window timeout.
 	RecoverMode bool `json:"recover_mode"`
 
+	// PosMode indicates if the sequencer is in Proof-of-Stake mode.
+	// In PoS mode, the sequencer should not automatically produce blocks,
+	// but only produce blocks when instructed by the manager.
+	PosMode bool `json:"pos_mode"`
+
+	// PoSActivationBlock is the first block number at which PoS scheduling applies.
+	// When 0 or next block >= PoSActivationBlock, PosMode applies (Manager assigns blocks).
+	// When > 0 and next block < PoSActivationBlock, only LegacySequencer auto-schedules; other nodes sync only.
+	PoSActivationBlock uint64 `json:"pos_activation_block"`
+
+	// LegacySequencer: when true and next block < PoSActivationBlock, this node is the single sequencer (auto-schedule).
+	// When false (default), before PoSActivationBlock this node only syncs from others and does not produce blocks.
+	// Set true only on the one node that continues the pre-upgrade chain (e.g. validator1).
+	LegacySequencer bool `json:"legacy_sequencer"`
+
 	// Maximum number of requests to make per batch
 	MaxRequestsPerBatch int `json:"max_requests_per_batch"`
 }

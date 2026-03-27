@@ -227,7 +227,7 @@ func RandomAccessList(rng *rand.Rand) types.AccessList {
 
 func RandomDynamicFeeTxWithBaseFee(rng *rand.Rand, baseFee *big.Int, signer types.Signer) *types.Transaction {
 	key := InsecureRandomKey(rng)
-	tip := big.NewInt(rng.Int63n(10 * params.GWei))
+	tip := big.NewInt(rng.Int63n(10 * params.DOLGWei))
 	txData := &types.DynamicFeeTx{
 		ChainID:    signer.ChainID(),
 		Nonce:      rng.Uint64(),
@@ -273,7 +273,7 @@ func RandomSetCodeAuth(rng *rand.Rand) types.SetCodeAuthorization {
 func RandomSetCodeTx(rng *rand.Rand, signer types.Signer) *types.Transaction {
 	baseFee := new(big.Int).SetUint64(rng.Uint64())
 	key := InsecureRandomKey(rng)
-	tip := big.NewInt(rng.Int63n(10 * params.GWei))
+	tip := big.NewInt(rng.Int63n(10 * params.DOLGWei))
 	to := RandomAddress(rng)
 	txData := &types.SetCodeTx{
 		ChainID:    uint256.MustFromBig(signer.ChainID()),

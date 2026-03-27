@@ -58,6 +58,11 @@ type RuntimeConfig struct {
 // runtimeConfigData is a flat bundle of configurable data, easy and light to copy around.
 type runtimeConfigData struct {
 	p2pBlockSignerAddr common.Address
+	// p2pAllowedSequencerAddrs is a list of all allowed sequencer addresses for PoS mode.
+	// In PoS mode, multiple validators can produce blocks, so we need to accept blocks from all of them.
+	p2pAllowedSequencerAddrs []common.Address
+
+	legacySequencerAddr common.Address
 
 	// superchain protocol version signals
 	recommended params.ProtocolVersion
@@ -79,6 +84,31 @@ func (r *RuntimeConfig) P2PSequencerAddress() common.Address {
 	return r.p2pBlockSignerAddr
 }
 
+func (r *RuntimeConfig) P2PAllowedSequencerAddresses() []common.Address {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var result []common.Address
+	if len(r.p2pAllowedSequencerAddrs) > 0 {
+		result = make([]common.Address, len(r.p2pAllowedSequencerAddrs))
+		copy(result, r.p2pAllowedSequencerAddrs)
+	} else if r.p2pBlockSignerAddr != (common.Address{}) {
+		result = []common.Address{r.p2pBlockSignerAddr}
+	}
+	if r.legacySequencerAddr != (common.Address{}) {
+		has := false
+		for _, a := range result {
+			if a == r.legacySequencerAddr {
+				has = true
+				break
+			}
+		}
+		if !has {
+			result = append(result, r.legacySequencerAddr)
+		}
+	}
+	return result
+}
+
 func (r *RuntimeConfig) RequiredProtocolVersion() params.ProtocolVersion {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -98,8 +128,32 @@ func (r *RuntimeConfig) Load(ctx context.Context, p2pSignerAddress common.Addres
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.p2pBlockSignerAddr = p2pSignerAddress
+	if p2pSignerAddress != (common.Address{}) {
+		r.p2pAllowedSequencerAddrs = []common.Address{p2pSignerAddress}
+	} else {
+		r.p2pAllowedSequencerAddrs = []common.Address{}
+	}
 	r.required = params.ProtocolVersion(common.HexToHash("0x1"))
 	r.recommended = params.ProtocolVersion(common.HexToHash("0x1"))
 	r.log.Info("loaded new runtime config values!", "p2p_seq_address", r.p2pBlockSignerAddr)
 	return nil
+}
+
+func (r *RuntimeConfig) SetLegacySequencerAddress(addr common.Address) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.legacySequencerAddr = addr
+	if addr != (common.Address{}) {
+		r.log.Info("set legacy sequencer address for P2P allowed list", "addr", addr)
+	}
+}
+
+// UpdateAllowedSequencerAddresses updates the list of allowed sequencer addresses.
+// This is called when receiving EpochSchedule from the manager, which contains all validator addresses.
+func (r *RuntimeConfig) UpdateAllowedSequencerAddresses(addresses []common.Address) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.p2pAllowedSequencerAddrs = make([]common.Address, len(addresses))
+	copy(r.p2pAllowedSequencerAddrs, addresses)
+	r.log.Info("updated allowed sequencer addresses", "count", len(addresses))
 }

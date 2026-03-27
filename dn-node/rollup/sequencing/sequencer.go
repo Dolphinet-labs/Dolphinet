@@ -52,6 +52,10 @@ type AsyncGossiper interface {
 	Start()
 }
 
+type BlockProducerChecker interface {
+	IsBlockProducerFor(nextBlock uint64) bool
+}
+
 // SequencerActionEvent triggers the sequencer to start/seal a block, if active and ready to act.
 // This event is used to prioritize sequencer work over derivation work,
 // by emitting it before e.g. a derivation-pipeline step.
@@ -85,7 +89,10 @@ type Sequencer struct {
 
 	maxSafeLag atomic.Uint64
 
-	recoverMode atomic.Bool
+	recoverMode        atomic.Bool
+	posMode            atomic.Bool
+	posActivationBlock uint64
+	legacySequencer    bool
 
 	// active identifies whether the sequencer is running.
 	// This is an atomic value, so it can be read without locking the whole sequencer.
@@ -117,34 +124,63 @@ type Sequencer struct {
 
 	latestHeadSet chan struct{}
 
+	// pendingSequencerAction indicates that a sequencer action is waiting for forkchoice update
+	// This is used in PoS mode to ensure chain is synchronized before building blocks
+	pendingSequencerAction atomic.Bool
+
+	blockProducerChecker BlockProducerChecker
+
 	// toBlockRef converts a payload to a block-ref, and is only configurable for test-purposes
 	toBlockRef func(rollupCfg *rollup.Config, payload *eth.ExecutionPayload) (eth.L2BlockRef, error)
 }
 
 var _ SequencerIface = (*Sequencer)(nil)
 
+func (d *Sequencer) isEffectivePosMode(nextBlock uint64) bool {
+	if d.posMode.Load() && (d.posActivationBlock == 0 || nextBlock >= d.posActivationBlock) {
+		return true
+	}
+	if d.posActivationBlock > 0 && nextBlock < d.posActivationBlock && !d.legacySequencer {
+		return true // before activation and we're not the legacy sequencer: sync only
+	}
+	return false
+}
+
 func NewSequencer(driverCtx context.Context, log log.Logger, rollupCfg *rollup.Config,
 	attributesBuilder derive.AttributesBuilder,
 	listener SequencerStateListener,
 	asyncGossip AsyncGossiper,
 	metrics Metrics,
+	posMode bool,
+	posActivationBlock uint64,
+	legacySequencer bool,
 ) *Sequencer {
-	return &Sequencer{
-		ctx:         driverCtx,
-		log:         log,
-		rollupCfg:   rollupCfg,
-		spec:        rollup.NewChainSpec(rollupCfg),
-		listener:    listener,
-		asyncGossip: asyncGossip,
-		attrBuilder: attributesBuilder,
-		metrics:     metrics,
-		timeNow:     time.Now,
-		toBlockRef:  derive.PayloadToBlockRef,
+	seq := &Sequencer{
+		ctx:                driverCtx,
+		log:                log,
+		rollupCfg:          rollupCfg,
+		spec:               rollup.NewChainSpec(rollupCfg),
+		listener:           listener,
+		asyncGossip:        asyncGossip,
+		attrBuilder:        attributesBuilder,
+		metrics:            metrics,
+		timeNow:            time.Now,
+		toBlockRef:         derive.PayloadToBlockRef,
+		posActivationBlock: posActivationBlock,
+		legacySequencer:    legacySequencer,
 	}
+	seq.posMode.Store(posMode)
+	return seq
 }
 
 func (d *Sequencer) AttachEmitter(em event.Emitter) {
 	d.emitter = em
+}
+
+func (d *Sequencer) SetBlockProducerChecker(checker BlockProducerChecker) {
+	d.l.Lock()
+	defer d.l.Unlock()
+	d.blockProducerChecker = checker
 }
 
 func (d *Sequencer) OnEvent(ev event.Event) bool {
@@ -345,9 +381,24 @@ func (d *Sequencer) onSequencerAction(SequencerActionEvent) {
 			d.emitter.Emit(engine.BuildSealEvent{
 				Info:         d.latest.Info,
 				BuildStarted: d.latest.Started,
-				Concluding:   true,
+				Concluding:   false,
 			})
 		} else if d.latest == (BuildingState{}) {
+			// In PoS mode, before building a block, request a forkchoice update
+			// to ensure we have the latest chain state (including blocks from other validators)
+			// This prevents building on stale chain state and causing forks
+			nextBlock := uint64(0)
+			if d.latestHead != (eth.L2BlockRef{}) {
+				nextBlock = d.latestHead.Number + 1
+			}
+			if d.isEffectivePosMode(nextBlock) {
+				d.log.Debug("PoS mode: requesting forkchoice update before building block to ensure chain is synchronized")
+				d.pendingSequencerAction.Store(true)
+				d.emitter.Emit(engine.ForkchoiceRequestEvent{})
+				// The forkchoice update will trigger onForkchoiceUpdate, which will check
+				// pendingSequencerAction and trigger the build if needed.
+				return
+			}
 			// If we have not started building anything, start building.
 			d.startBuildingBlock()
 		}
@@ -419,7 +470,24 @@ func (d *Sequencer) onForkchoiceUpdate(x engine.ForkchoiceUpdateEvent) {
 		// The cleared state will block further BuildStarted/BuildSealed responses from continuing the stale build job.
 		d.latest = BuildingState{}
 	}
-	if x.UnsafeL2Head.Number > d.latestHead.Number {
+	nextBlock := x.UnsafeL2Head.Number + 1
+	effectivePosMode := d.isEffectivePosMode(nextBlock)
+	if effectivePosMode {
+		d.nextActionOK = false
+		d.log.Debug("PoS mode active, sequencer not automatically scheduling next block")
+		// If there's a pending sequencer action and we're not building anything,
+		// trigger the build now that we have the latest forkchoice state
+		if d.pendingSequencerAction.Load() && d.latest == (BuildingState{}) {
+			d.pendingSequencerAction.Store(false)
+			if d.blockProducerChecker != nil && !d.blockProducerChecker.IsBlockProducerFor(nextBlock) {
+				d.log.Debug("PoS mode: skipping block build, this node is not assigned for block",
+					"block", nextBlock)
+				return
+			}
+			d.log.Debug("PoS mode: forkchoice updated, triggering pending sequencer action")
+			d.startBuildingBlock()
+		}
+	} else if x.UnsafeL2Head.Number > d.latestHead.Number {
 		d.nextActionOK = true
 		now := d.timeNow()
 		blockTime := time.Duration(d.rollupCfg.BlockTime) * time.Second
@@ -527,7 +595,7 @@ func (d *Sequencer) startBuildingBlock() {
 	withParent := &derive.AttributesWithParent{
 		Attributes: attrs,
 		Parent:     l2Head,
-		Concluding: true, // todo: after vote change Concluding from false to true
+		Concluding: false,
 	}
 
 	// Don't try to start building a block again, until we have heard back from this attempt
@@ -615,11 +683,17 @@ func (d *Sequencer) forceStart() error {
 	}
 	// clear the building state; interrupting any existing sequencing job (there should never be one)
 	d.latest = BuildingState{}
-	d.nextActionOK = true
-	d.nextAction = d.timeNow()
+	effectivePos := d.isEffectivePosMode(0) // 0 = next block not yet known at start
+	if effectivePos {
+		d.nextActionOK = false
+		d.log.Info("Sequencer has been started (PoS mode or sync-only before activation, waiting for manager block assignments or P2P sync)")
+	} else {
+		d.nextActionOK = true
+		d.nextAction = d.timeNow()
+		d.log.Info("Sequencer has been started", "next action", d.nextAction)
+	}
 	d.active.Store(true)
 	d.metrics.SetSequencerState(true)
-	d.log.Info("Sequencer has been started", "next action", d.nextAction)
 	return nil
 }
 

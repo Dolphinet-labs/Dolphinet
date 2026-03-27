@@ -13,12 +13,16 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/metrics"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/node/safedb"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/p2p"
+	"github.com/dolphinnet-labs/dolphinnet/dn-node/pos"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup/driver"
 	"github.com/dolphinnet-labs/dolphinnet/dn-node/rollup/event"
@@ -75,6 +79,16 @@ type OpNode struct {
 	beacon *sources.L1BeaconClient
 
 	interopSys interop.SubSystem
+
+	// PoS Manager client
+	managerClient *pos.ManagerClient
+	posEmitter    event.Emitter // emitter for triggering SequencerActionEvent
+
+	// Current epoch schedule for determining block producer
+	currentEpochSchedule *pos.EpochSchedule
+	// Historical epoch schedules (max 5) for calculating safe and finalized blocks
+	epochScheduleHistory []*pos.EpochSchedule
+	epochScheduleMu      gosync.RWMutex
 
 	// some resources cannot be stopped directly, like the p2p gossipsub router (not our design),
 	// and depend on this ctx to be closed.
@@ -160,6 +174,9 @@ func (n *OpNode) init(ctx context.Context, cfg *Config) error {
 	if err := n.initPProf(cfg); err != nil {
 		return fmt.Errorf("failed to init profiling: %w", err)
 	}
+	if err := n.initManagerClient(ctx, cfg); err != nil {
+		return fmt.Errorf("failed to init manager client: %w", err)
+	}
 	return nil
 }
 
@@ -192,6 +209,9 @@ func (n *OpNode) initRuntimeConfig(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		n.log.Error("failed to fetch runtime config data", "err", err)
 		return err
+	}
+	if cfg.LegacySequencerAddress != (common.Address{}) {
+		n.runCfg.SetLegacySequencerAddress(cfg.LegacySequencerAddress)
 	}
 	return nil
 }
@@ -241,7 +261,18 @@ func (n *OpNode) initL2(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("cfg.Rollup.ChainOpConfig is nil. Please see https://github.com/dolphinnet-labs/dolphinnet/releases/tag/dn-node/v1.11.0: %w", err)
 	}
 
-	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.elClient, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, managedMode, cfg.Driver.MaxRequestsPerBatch)
+	var blockProducerChecker sequencing.BlockProducerChecker
+	if cfg.Driver.PosMode {
+		blockProducerChecker = n
+	}
+	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.elClient, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, managedMode, cfg.Driver.MaxRequestsPerBatch, blockProducerChecker)
+
+	n.l2Driver.SetEpochInfoGetter(n)
+
+	if cfg.ManagerURL != "" {
+		n.posEmitter = n.eventSys.Register("pos-manager", nil, event.DefaultRegisterOpts())
+	}
+
 	return nil
 }
 
@@ -276,6 +307,11 @@ func (n *OpNode) initRPCServer(cfg *Config) error {
 		})
 		n.log.Info("Admin RPC enabled")
 	}
+	server.AddAPI(rpc.API{
+		Namespace: "opnode",
+		Service:   NewOpNodeAPI(n),
+	})
+	n.log.Info("OpNode RPC enabled")
 	n.log.Info("Starting JSON-RPC server")
 	if err := server.Start(); err != nil {
 		return fmt.Errorf("unable to start RPC server: %w", err)
@@ -329,7 +365,8 @@ func (n *OpNode) initP2P(cfg *Config) (err error) {
 	}
 	if n.p2pEnabled() {
 		// TODO(protocol-quest#97): Use EL Sync instead of CL Alt sync for fetching missing blocks in the payload queue.
-		n.p2pNode, err = p2p.NewNodeP2P(n.resourcesCtx, &cfg.Rollup, n.log, cfg.P2P, n, n.l2Source, n.runCfg, n.metrics, false)
+		l2ChainForP2P := &p2pL2ChainAdapter{EngineClient: n.l2Source}
+		n.p2pNode, err = p2p.NewNodeP2P(n.resourcesCtx, &cfg.Rollup, n.log, cfg.P2P, n, l2ChainForP2P, n.runCfg, n.metrics, false)
 		if err != nil {
 			return
 		}
@@ -350,6 +387,260 @@ func (n *OpNode) initP2PSigner(ctx context.Context, cfg *Config) (err error) {
 	return
 }
 
+func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
+	if cfg.ManagerURL == "" {
+		n.log.Info("PoS manager not configured, using default sequencer mode")
+		return nil
+	}
+
+	n.log.Info("Initializing PoS manager client",
+		"manager_url", cfg.ManagerURL,
+		"validator_address", cfg.P2PSignerAddress.Hex())
+
+	// Use P2PSignerAddress as validator address
+	client := pos.NewManagerClient(cfg.ManagerURL, cfg.P2PSignerAddress, n.log)
+
+	client.SetBootnodesProvider(func() []string {
+		p2pNode := n.getP2PNodeIfEnabled()
+		if p2pNode == nil || p2pNode.Dv5Udp() == nil {
+			return nil
+		}
+		self := p2pNode.Dv5Udp().Self()
+		if self == nil {
+			return nil
+		}
+		return []string{self.String()}
+	})
+
+	client.SetOnBootnodesUpdate(func(bootnodes []string) error {
+		p2pNode := n.getP2PNodeIfEnabled()
+		if p2pNode == nil {
+			return nil
+		}
+		added, err := p2pNode.AddDiscv5Bootnodes(bootnodes)
+		if err != nil {
+			n.log.Warn("Failed to add discv5 bootnodes from manager update", "err", err)
+		}
+		if added > 0 {
+			n.log.Info("Imported bootnodes from manager update", "added", added, "count", len(bootnodes))
+		}
+		return nil
+	})
+
+	// Set block assignment callback
+	// Manager only sends to validators that should produce blocks based on scheduler, so receiving a message means we should produce a block
+	// After block production, it will automatically broadcast to other validator nodes via P2P (implemented in PublishL2Payload)
+	// Other validators receive P2P messages via OnUnsafeL2Payload to complete synchronization
+	client.SetOnBlockAssignment(func(assignment pos.BlockAssignment) error {
+		if cfg.PoSActivationBlock != 0 && assignment.BlockNumber < cfg.PoSActivationBlock {
+			n.log.Debug("Ignoring block assignment before PoS activation", "block_number", assignment.BlockNumber, "pos_activation_block", cfg.PoSActivationBlock)
+			return nil
+		}
+		n.log.Info("Received block assignment from manager",
+			"block_number", assignment.BlockNumber,
+			"epoch", assignment.Epoch,
+			"validator", assignment.Validator.Hex())
+
+		// Notify manager that block production has started
+		if err := client.SendValidatorStatus(assignment.BlockNumber, "mining"); err != nil {
+			n.log.Warn("Failed to send validator status", "err", err)
+		}
+
+		// Trigger sequencer to produce block
+		// After block production, sequencer will automatically trigger PublishL2Payload via asyncGossip for P2P broadcast
+		if n.posEmitter != nil {
+			n.posEmitter.Emit(sequencing.SequencerActionEvent{})
+		}
+
+		return nil
+	})
+
+	// Set heartbeat callback to detect if manager is alive
+	client.SetOnHeartbeat(func(heartbeat pos.HeartbeatMessage) error {
+		n.log.Debug("Received heartbeat from manager",
+			"block_number", heartbeat.BlockNumber,
+			"epoch", heartbeat.Epoch)
+		return nil
+	})
+
+	// Set epoch schedule callback
+	client.SetOnEpochSchedule(func(schedule pos.EpochSchedule) error {
+		n.log.Info("Received epoch schedule from manager",
+			"epoch", schedule.Epoch,
+			"start_block", schedule.StartBlock,
+			"end_block", schedule.EndBlock)
+
+		// Store current epoch schedule for determining block producer
+		n.epochScheduleMu.Lock()
+		if n.currentEpochSchedule != nil {
+			found := false
+			for _, hist := range n.epochScheduleHistory {
+				if hist.Epoch == n.currentEpochSchedule.Epoch {
+					found = true
+					break
+				}
+			}
+			if !found {
+				n.epochScheduleHistory = append(n.epochScheduleHistory, n.currentEpochSchedule)
+				const maxHistorySize = 5
+				if len(n.epochScheduleHistory) > maxHistorySize {
+					n.epochScheduleHistory = n.epochScheduleHistory[1:]
+				}
+			}
+		}
+		n.currentEpochSchedule = &schedule
+		n.epochScheduleMu.Unlock()
+
+		if len(schedule.Validators) > 0 && (cfg.PoSActivationBlock == 0 || schedule.StartBlock >= cfg.PoSActivationBlock) {
+			validatorAddrs := make([]common.Address, 0, len(schedule.Validators))
+			for addr := range schedule.Validators {
+				validatorAddrs = append(validatorAddrs, addr)
+			}
+			n.runCfg.UpdateAllowedSequencerAddresses(validatorAddrs)
+			n.log.Info("Updated allowed sequencer addresses from epoch schedule",
+				"count", len(validatorAddrs))
+		}
+
+		return nil
+	})
+
+	client.SetOnVoteReward(func(reward pos.VoteRewardMessage) error {
+		n.log.Info("Received vote reward from manager",
+			"target_block", reward.TargetBlock,
+			"voted_block", reward.VotedBlock,
+			"reward_count", len(reward.Rewards))
+
+		if n.l2Source == nil || n.l2Source.EngineAPIClient == nil {
+			n.log.Warn("L2Source not available, cannot set vote rewards")
+			return nil
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rewards := make([]map[string]interface{}, 0, len(reward.Rewards))
+		for _, r := range reward.Rewards {
+			rewards = append(rewards, map[string]interface{}{
+				"voter":  r.Voter.Hex(),
+				"amount": r.Amount,
+			})
+		}
+
+		err := n.l2Source.EngineAPIClient.RPC.CallContext(ctx, nil, "engine_setVoteRewards", hexutil.Uint64(reward.TargetBlock), rewards)
+		if err != nil {
+			n.log.Error("Failed to set vote rewards in geth", "err", err, "target_block", reward.TargetBlock, "voted_block", reward.VotedBlock)
+			return err
+		}
+
+		n.log.Info("Set vote rewards in geth", "target_block", reward.TargetBlock, "voted_block", reward.VotedBlock, "count", len(rewards))
+		return nil
+	})
+
+	client.SetOnVoteRequest(func(request pos.VoteRequestMessage) error {
+		n.log.Info("Received vote request from manager",
+			"block_number", request.BlockNumber,
+			"deadline", request.VoteDeadline)
+
+		if time.Now().After(request.VoteDeadline) {
+			n.log.Warn("Vote deadline has passed, ignoring vote request", "block", request.BlockNumber)
+			return nil
+		}
+
+		if n.l2Source == nil || n.l2Source.L2Client == nil {
+			n.log.Warn("L2Source not available, cannot fetch block hash")
+			return nil
+		}
+
+		var blockRef eth.L2BlockRef
+		var err error
+		retryInterval := 500 * time.Millisecond
+		maxRetries := int(time.Until(request.VoteDeadline) / retryInterval)
+		if maxRetries > 20 {
+			maxRetries = 20
+		}
+		if maxRetries < 1 {
+			maxRetries = 1
+		}
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if time.Now().After(request.VoteDeadline) {
+				n.log.Warn("Vote deadline passed while retrying", "block", request.BlockNumber, "attempts", attempt+1)
+				return nil
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			blockRef, err = n.l2Source.L2Client.L2BlockRefByNumber(ctx, request.BlockNumber)
+			cancel()
+
+			if err == nil {
+				break
+			}
+
+			if attempt < maxRetries-1 {
+				time.Sleep(retryInterval)
+			}
+		}
+
+		if err != nil {
+			n.log.Error("Failed to get block ref for voting after retries", "block", request.BlockNumber, "err", err, "attempts", maxRetries)
+			return err
+		}
+
+		blockHash := blockRef.Hash
+
+		voteMsg := pos.BlockVoteMessage{
+			Type:        pos.MessageTypeBlockVote,
+			Voter:       n.cfg.P2PSignerAddress,
+			BlockNumber: request.BlockNumber,
+			BlockHash:   blockHash,
+			Timestamp:   time.Now(),
+		}
+
+		if err := client.SendBlockVote(voteMsg); err != nil {
+			n.log.Error("Failed to send block vote", "err", err)
+			return err
+		}
+
+		n.log.Info("Sent block vote", "block", request.BlockNumber, "hash", blockHash.Hex())
+		return nil
+	})
+
+	client.SetOnRegisterAck(func(status string) error {
+		if status != "success" {
+			n.log.Warn("Registration failed, skipping vote reward request", "status", status)
+			return nil
+		}
+
+		n.log.Info("Registration successful, requesting missing vote rewards")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		head, err := n.l2Source.L2BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			n.log.Warn("Failed to get local head for vote reward request", "err", err)
+			return nil
+		}
+
+		startBlock := head.Number
+
+		n.log.Info("Requesting all vote rewards from manager",
+			"start_block", startBlock,
+			"local_head", head.Number)
+
+		if err := client.RequestVoteRewards(startBlock); err != nil {
+			n.log.Error("Failed to request vote rewards from manager", "err", err)
+			return err
+		}
+
+		return nil
+	})
+
+	n.managerClient = client
+
+	return nil
+}
+
 func (n *OpNode) Start(ctx context.Context) error {
 	if n.interopSys != nil {
 		if err := n.interopSys.Start(ctx); err != nil {
@@ -357,6 +648,16 @@ func (n *OpNode) Start(ctx context.Context) error {
 			return err
 		}
 	}
+
+	// Start manager client (if configured)
+	if n.managerClient != nil {
+		if err := n.managerClient.Start(ctx); err != nil {
+			n.log.Error("Could not start manager client", "err", err)
+			return err
+		}
+		n.log.Info("Manager client started")
+	}
+
 	n.log.Info("Starting execution engine driver")
 	// start driving engine: sync blocks by deriving them from L1 and driving them into the engine
 	if err := n.l2Driver.Start(); err != nil {
@@ -364,7 +665,38 @@ func (n *OpNode) Start(ctx context.Context) error {
 		return err
 	}
 	log.Info("Rollup node started")
+
+	if n.managerClient != nil {
+		go n.posRegisterLoop(ctx)
+	}
 	return nil
+}
+
+func (n *OpNode) posRegisterLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n.managerClient == nil || !n.managerClient.IsConnected() {
+				continue
+			}
+			status, err := n.l2Driver.SyncStatus(ctx)
+			if err != nil || status == nil {
+				continue
+			}
+			nextBlock := status.UnsafeL2.Number + 1
+			if n.cfg.PoSActivationBlock != 0 && nextBlock < n.cfg.PoSActivationBlock {
+				n.log.Debug("PoS registration deferred until activation height", "next_block", nextBlock, "pos_activation_block", n.cfg.PoSActivationBlock)
+				continue
+			}
+			if err := n.managerClient.RegisterWithBlockNumber(nextBlock); err != nil {
+				n.log.Warn("Failed to register with manager", "err", err)
+			}
+		}
+	}
 }
 
 // onEvent handles broadcast events.
@@ -422,12 +754,22 @@ func (n *OpNode) OnNewL1Finalized(ctx context.Context, sig eth.L1BlockRef) {
 func (n *OpNode) PublishL2Payload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope) error {
 	n.tracer.OnPublishL2Payload(ctx, envelope)
 
-	// publish to p2p, if we are running p2p at all
+	// After block production, broadcast to other validator nodes via P2P
+	// Other validators receive and synchronize blocks via OnUnsafeL2Payload
 	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil {
 		if n.p2pSigner == nil {
 			return fmt.Errorf("node has no p2p signer, payload %s cannot be published", envelope.ID())
 		}
 		n.log.Info("Publishing signed execution payload on p2p", "id", envelope.ID())
+
+		// Notify manager that block production is complete
+		if n.managerClient != nil {
+			blockNumber := uint64(envelope.ExecutionPayload.BlockNumber)
+			if err := n.managerClient.SendValidatorStatus(blockNumber, "done"); err != nil {
+				n.log.Warn("Failed to send done status to manager", "err", err)
+			}
+		}
+
 		return p2pNode.GossipOut().SignAndPublishL2Payload(ctx, envelope, n.p2pSigner)
 	}
 	// if p2p is not enabled then we just don't publish the payload
@@ -456,9 +798,151 @@ func (n *OpNode) OnUnsafeL2Payload(ctx context.Context, from peer.ID, envelope *
 	return nil
 }
 
+func (n *OpNode) OnUnsafeTransactions(ctx context.Context, from peer.ID, txs []*types.Transaction) error {
+	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil && from == p2pNode.Host().ID() {
+		return nil
+	}
+
+	n.log.Info("Received transactions from P2P", "count", len(txs), "peer", from)
+
+	isProducer, err := n.isCurrentBlockProducer(ctx)
+	if err != nil {
+		n.log.Warn("Failed to determine if current block producer", "err", err)
+		return nil
+	}
+
+	if !isProducer {
+		n.log.Debug("Not current block producer, ignoring P2P transactions")
+		return nil
+	}
+
+	if n.l2Source == nil || n.l2Source.EngineAPIClient == nil || n.l2Source.EngineAPIClient.RPC == nil {
+		return fmt.Errorf("L2 source not available")
+	}
+
+	n.log.Info("Current block producer: adding P2P transactions to local txpool", "count", len(txs))
+	for _, tx := range txs {
+		txData, err := tx.MarshalBinary()
+		if err != nil {
+			n.log.Warn("Failed to marshal transaction", "hash", tx.Hash(), "err", err)
+			continue
+		}
+		var result common.Hash
+		if err := n.l2Source.EngineAPIClient.RPC.CallContext(ctx, &result, "eth_sendRawTransaction", hexutil.Encode(txData)); err != nil {
+			n.log.Debug("Failed to add transaction to txpool (may already exist)", "hash", tx.Hash(), "err", err)
+		} else {
+			n.log.Debug("Added transaction to txpool from P2P", "hash", tx.Hash())
+		}
+	}
+
+	return nil
+}
+
+func (n *OpNode) PublishTransactions(ctx context.Context, txs []*types.Transaction) error {
+	if len(txs) == 0 {
+		return nil
+	}
+
+	isProducer, err := n.isCurrentBlockProducer(ctx)
+	if err != nil {
+		n.log.Warn("Failed to determine if current block producer", "err", err)
+		isProducer = false
+	}
+
+	if isProducer {
+		if n.l2Source == nil || n.l2Source.EngineAPIClient == nil || n.l2Source.EngineAPIClient.RPC == nil {
+			return fmt.Errorf("L2 source not available")
+		}
+
+		n.log.Info("Current block producer: adding transactions to local txpool", "count", len(txs))
+		for _, tx := range txs {
+			txData, err := tx.MarshalBinary()
+			if err != nil {
+				n.log.Warn("Failed to marshal transaction", "hash", tx.Hash(), "err", err)
+				continue
+			}
+
+			var result common.Hash
+			if err := n.l2Source.EngineAPIClient.RPC.CallContext(ctx, &result, "eth_sendRawTransaction", hexutil.Encode(txData)); err != nil {
+				n.log.Debug("Failed to add transaction to txpool (may already exist)", "hash", tx.Hash(), "err", err)
+			} else {
+				n.log.Debug("Added transaction to txpool", "hash", tx.Hash())
+			}
+		}
+		return nil
+	}
+
+	p2pNode := n.getP2PNodeIfEnabled()
+	if p2pNode == nil {
+		return fmt.Errorf("P2P not enabled, cannot forward transactions")
+	}
+
+	n.log.Info("Not current block producer: forwarding transactions via P2P", "count", len(txs))
+	return p2pNode.GossipOut().PublishTransactions(ctx, txs)
+}
+
+// isCurrentBlockProducer checks if this node is the current block producer based on epoch schedule
+func (n *OpNode) isCurrentBlockProducer(ctx context.Context) (bool, error) {
+	if !n.cfg.Driver.PosMode {
+		return false, nil
+	}
+
+	n.epochScheduleMu.RLock()
+	schedule := n.currentEpochSchedule
+	n.epochScheduleMu.RUnlock()
+
+	if schedule == nil {
+		// No epoch schedule received yet, cannot determine
+		return false, nil
+	}
+
+	if n.l2Source == nil {
+		return false, nil
+	}
+
+	head, err := n.l2Source.L2BlockRefByLabel(ctx, eth.Unsafe)
+	if err != nil {
+		n.log.Debug("Failed to get current block number", "err", err)
+		return false, nil
+	}
+
+	nextBlockNumber := head.Number + 1
+
+	for _, assignment := range schedule.Assignments {
+		if assignment.BlockNumber == nextBlockNumber {
+			isProducer := assignment.Validator == n.cfg.P2PSignerAddress
+			if isProducer {
+				n.log.Debug("This node is the current block producer", "block_number", nextBlockNumber)
+			}
+			return isProducer, nil
+		}
+	}
+
+	n.log.Debug("No assignment found for next block, not the current producer", "next_block", nextBlockNumber)
+	return false, nil
+}
+
+func (n *OpNode) IsBlockProducerFor(nextBlock uint64) bool {
+	if !n.cfg.Driver.PosMode {
+		return false
+	}
+	n.epochScheduleMu.RLock()
+	schedule := n.currentEpochSchedule
+	n.epochScheduleMu.RUnlock()
+	if schedule == nil {
+		return false
+	}
+	for _, assignment := range schedule.Assignments {
+		if assignment.BlockNumber == nextBlock {
+			return assignment.Validator == n.cfg.P2PSignerAddress
+		}
+	}
+	return false
+}
+
 func (n *OpNode) RequestL2Range(ctx context.Context, start, end eth.L2BlockRef) error {
 	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil && p2pNode.AltSyncEnabled() {
-		if unixTimeStale(start.Time, 12*time.Hour) {
+		if start.Number != 0 && unixTimeStale(start.Time, 12*time.Hour) {
 			n.log.Debug(
 				"ignoring request to sync core range, timestamp is too old for p2p",
 				"start", start,
@@ -561,6 +1045,11 @@ func (n *OpNode) Stop(ctx context.Context) error {
 		}
 	}
 
+	// close manager client
+	if n.managerClient != nil {
+		n.managerClient.Stop()
+	}
+
 	if n.eventSys != nil {
 		n.eventSys.Stop()
 	}
@@ -650,4 +1139,24 @@ func (n *OpNode) getP2PNodeIfEnabled() *p2p.NodeP2P {
 	n.p2pMu.Lock()
 	defer n.p2pMu.Unlock()
 	return n.p2pNode
+}
+
+func (n *OpNode) GetEpochForBlock(blockNumber uint64) (epoch uint64, startBlock uint64, endBlock uint64, found bool) {
+	n.epochScheduleMu.RLock()
+	defer n.epochScheduleMu.RUnlock()
+
+	if n.currentEpochSchedule != nil {
+		if blockNumber >= n.currentEpochSchedule.StartBlock && blockNumber <= n.currentEpochSchedule.EndBlock {
+			return n.currentEpochSchedule.Epoch, n.currentEpochSchedule.StartBlock, n.currentEpochSchedule.EndBlock, true
+		}
+	}
+
+	for i := len(n.epochScheduleHistory) - 1; i >= 0; i-- {
+		hist := n.epochScheduleHistory[i]
+		if hist != nil && blockNumber >= hist.StartBlock && blockNumber <= hist.EndBlock {
+			return hist.Epoch, hist.StartBlock, hist.EndBlock, true
+		}
+	}
+
+	return 0, 0, 0, false
 }

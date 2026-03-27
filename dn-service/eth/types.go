@@ -306,26 +306,82 @@ func (s rawTransactions) EncodeIndex(i int, w *bytes.Buffer) {
 func (envelope *ExecutionPayloadEnvelope) CheckBlockHash() (actual common.Hash, ok bool) {
 	payload := envelope.ExecutionPayload
 
+	// Skip hash validation for genesis blocks (block number 0)
+	// Different validators may have different genesis block hashes, which is acceptable
+	if uint64(payload.BlockNumber) == 0 {
+		return payload.BlockHash, true
+	}
+
 	hasher := trie.NewStackTrie(nil)
 	txHash := types.DeriveSha(rawTransactions(payload.Transactions), hasher)
 
+	// Convert BlobGasUsed and ExcessBlobGas from *Uint64Quantity to *uint64
+	// Important: If payload.BlobGasUsed/ExcessBlobGas is not nil (even if value is 0),
+	// we must preserve it as a non-nil pointer in Header to match geth's RLP encoding.
+	// Geth's RLP encoding includes these fields if they are non-nil, even if the value is 0.
+	var blobGasUsed *uint64
+	var excessBlobGas *uint64
+	if payload.BlobGasUsed != nil {
+		val := uint64(*payload.BlobGasUsed)
+		blobGasUsed = &val // Always preserve as non-nil pointer if payload field is non-nil
+	} else {
+		blobGasUsed = nil
+	}
+	if payload.ExcessBlobGas != nil {
+		val := uint64(*payload.ExcessBlobGas)
+		excessBlobGas = &val // Always preserve as non-nil pointer if payload field is non-nil
+	} else {
+		excessBlobGas = nil
+	}
+
+	// Handle ParentBeaconBlockRoot: if it's a zero hash, set to nil to match geth's behavior
+	var parentBeaconRoot *common.Hash
+	if envelope.ParentBeaconBlockRoot != nil {
+		if *envelope.ParentBeaconBlockRoot == (common.Hash{}) {
+			parentBeaconRoot = nil
+		} else {
+			parentBeaconRoot = envelope.ParentBeaconBlockRoot
+		}
+	} else {
+		parentBeaconRoot = nil
+	}
+
+	// Handle WithdrawalsHash: if payload.Withdrawals is non-nil (post-Shanghai),
+	// but WithdrawalsRoot is nil, it means empty withdrawals, so use EmptyWithdrawalsHash
+	var withdrawalsHash *common.Hash
+	if payload.WithdrawalsRoot != nil {
+		withdrawalsHash = payload.WithdrawalsRoot
+	} else if payload.Withdrawals != nil {
+		emptyHash := types.EmptyWithdrawalsHash
+		withdrawalsHash = &emptyHash
+	} else {
+		withdrawalsHash = nil
+	}
+
+	receiptHash := common.Hash(payload.ReceiptsRoot)
+
 	header := types.Header{
-		ParentHash:  payload.ParentHash,
-		UncleHash:   types.EmptyUncleHash,
-		Coinbase:    payload.FeeRecipient,
-		Root:        common.Hash(payload.StateRoot),
-		TxHash:      txHash,
-		ReceiptHash: common.Hash(payload.ReceiptsRoot),
-		Bloom:       types.Bloom(payload.LogsBloom),
-		Difficulty:  common.Big0, // zeroed, proof-of-work legacy
-		Number:      big.NewInt(int64(payload.BlockNumber)),
-		GasLimit:    uint64(payload.GasLimit),
-		GasUsed:     uint64(payload.GasUsed),
-		Time:        uint64(payload.Timestamp),
-		Extra:       payload.ExtraData,
-		MixDigest:   common.Hash(payload.PrevRandao),
-		Nonce:       types.BlockNonce{}, // zeroed, proof-of-work legacy
-		BaseFee:     (*uint256.Int)(&payload.BaseFeePerGas).ToBig(),
+		ParentHash:       payload.ParentHash,
+		UncleHash:        types.EmptyUncleHash,
+		Coinbase:         payload.FeeRecipient,
+		Root:             common.Hash(payload.StateRoot),
+		TxHash:           txHash,
+		ReceiptHash:      receiptHash,
+		Bloom:            types.Bloom(payload.LogsBloom),
+		Difficulty:       common.Big0, // zeroed, proof-of-work legacy
+		Number:           big.NewInt(int64(payload.BlockNumber)),
+		GasLimit:         uint64(payload.GasLimit),
+		GasUsed:          uint64(payload.GasUsed),
+		Time:             uint64(payload.Timestamp),
+		Extra:            payload.ExtraData,
+		MixDigest:        common.Hash(payload.PrevRandao),
+		Nonce:            types.BlockNonce{}, // zeroed, proof-of-work legacy
+		BaseFee:          (*uint256.Int)(&payload.BaseFeePerGas).ToBig(),
+		WithdrawalsHash:  withdrawalsHash,
+		BlobGasUsed:      blobGasUsed,
+		ExcessBlobGas:    excessBlobGas,
+		ParentBeaconRoot: parentBeaconRoot,
+		RequestsHash:     nil,
 	}
 
 	blockHash := header.Hash()
@@ -349,6 +405,17 @@ func BlockAsPayload(bl *types.Block, config *params.ChainConfig) (*ExecutionPayl
 		return nil, fmt.Errorf("base fee was nil")
 	}
 
+	var blobGasUsed *Uint64Quantity
+	var excessBlobGas *Uint64Quantity
+	if bl.BlobGasUsed() != nil {
+		val := Uint64Quantity(*bl.BlobGasUsed())
+		blobGasUsed = &val
+	}
+	if bl.ExcessBlobGas() != nil {
+		val := Uint64Quantity(*bl.ExcessBlobGas())
+		excessBlobGas = &val
+	}
+
 	payload := &ExecutionPayload{
 		ParentHash:    bl.ParentHash(),
 		FeeRecipient:  bl.Coinbase(),
@@ -364,9 +431,8 @@ func BlockAsPayload(bl *types.Block, config *params.ChainConfig) (*ExecutionPayl
 		BaseFeePerGas: Uint256Quantity(*baseFee),
 		BlockHash:     bl.Hash(),
 		Transactions:  opaqueTxs,
-		ExcessBlobGas: (*Uint64Quantity)(bl.ExcessBlobGas()),
-		BlobGasUsed:   (*Uint64Quantity)(bl.BlobGasUsed()),
-		// WithdrawalsRoot is only set starting at Isthmus
+		ExcessBlobGas: excessBlobGas,
+		BlobGasUsed:   blobGasUsed,
 	}
 
 	if config.ShanghaiTime != nil && uint64(payload.Timestamp) >= *config.ShanghaiTime {
@@ -385,10 +451,20 @@ func BlockAsPayloadEnv(bl *types.Block, config *params.ChainConfig) (*ExecutionP
 	if err != nil {
 		return nil, err
 	}
-	return &ExecutionPayloadEnvelope{
+	if payload == nil {
+		return nil, fmt.Errorf("BlockAsPayload returned nil payload without error")
+	}
+
+	beaconRoot := bl.BeaconRoot()
+	if beaconRoot == nil {
+		zeroHash := common.Hash{}
+		beaconRoot = &zeroHash
+	}
+	env := &ExecutionPayloadEnvelope{
 		ExecutionPayload:      payload,
-		ParentBeaconBlockRoot: bl.BeaconRoot(),
-	}, nil
+		ParentBeaconBlockRoot: beaconRoot,
+	}
+	return env, nil
 }
 
 type PayloadAttributes struct {

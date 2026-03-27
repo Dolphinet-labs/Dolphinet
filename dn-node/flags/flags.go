@@ -385,6 +385,39 @@ var (
 		Category: RollupCategory,
 		Hidden:   true,
 	}
+	ManagerURLFlag = &cli.StringFlag{
+		Name:     "pos.manager-url",
+		Usage:    "WebSocket URL of the dolphinet-manager for PoS block scheduling",
+		EnvVars:  prefixEnvVars("POS_MANAGER_URL"),
+		Category: SequencerCategory,
+	}
+	PosModeEnabledFlag = &cli.BoolFlag{
+		Name:     "pos.enabled",
+		Usage:    "Enable the pos service",
+		EnvVars:  prefixEnvVars("POS_ENABLED"),
+		Value:    false,
+		Category: SequencerCategory,
+	}
+	PoSActivationBlockFlag = &cli.Uint64Flag{
+		Name:     "pos.activation-block",
+		Usage:    "First block number at which PoS rules apply (Manager scheduling). 0 = PoS from genesis. Used for chain upgrade.",
+		EnvVars:  prefixEnvVars("POS_ACTIVATION_BLOCK"),
+		Value:    0,
+		Category: SequencerCategory,
+	}
+	LegacySequencerFlag = &cli.BoolFlag{
+		Name:     "pos.legacy-sequencer",
+		Usage:    "If set, this node is the single sequencer before pos.activation-block; other nodes only sync. Set only on the node that has the pre-upgrade chain.",
+		EnvVars:  prefixEnvVars("POS_LEGACY_SEQUENCER"),
+		Value:    false,
+		Category: SequencerCategory,
+	}
+	LegacySequencerAddressFlag = &cli.StringFlag{
+		Name:     "pos.legacy-sequencer-address",
+		Usage:    "Ethereum address of the legacy sequencer (e.g. validator1). When set on a non-legacy node, P2P accepts blocks from this address for syncing before PoS activation.",
+		EnvVars:  prefixEnvVars("POS_LEGACY_SEQUENCER_ADDRESS"),
+		Category: SequencerCategory,
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -430,6 +463,11 @@ var optionalFlags = []cli.Flag{
 	InteropRPCPort,
 	InteropJWTSecret,
 	IgnoreMissingPectraBlobSchedule,
+	ManagerURLFlag,
+	PosModeEnabledFlag,
+	PoSActivationBlockFlag,
+	LegacySequencerFlag,
+	LegacySequencerAddressFlag,
 }
 
 var DeprecatedFlags = []cli.Flag{

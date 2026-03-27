@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dolphinnet-labs/dolphinnet/dn-service/sources"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -41,10 +42,16 @@ type ExecEngine interface {
 	ForkchoiceUpdate(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error)
 	NewPayload(ctx context.Context, payload *eth.ExecutionPayload, parentBeaconBlockRoot *common.Hash) (*eth.PayloadStatusV1, error)
 	L2BlockRefByLabel(ctx context.Context, label eth.BlockLabel) (eth.L2BlockRef, error)
+	L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error)
+}
+
+type EpochInfoGetter interface {
+	GetEpochForBlock(blockNumber uint64) (epoch uint64, startBlock uint64, endBlock uint64, found bool)
 }
 
 type EngineController struct {
 	engine     ExecEngine // Underlying execution engine RPC
+	elClient   *sources.EthClient
 	log        log.Logger
 	metrics    derive.Metrics
 	syncCfg    *sync.Config
@@ -84,9 +91,12 @@ type EngineController struct {
 	// because engine may forgot backupUnsafeHead or backupUnsafeHead is not part
 	// of the chain.
 	needFCUCallForBackupUnsafeReorg bool
+
+	// Epoch info getter for calculating safe and finalized blocks based on epochs
+	epochInfoGetter EpochInfoGetter
 }
 
-func NewEngineController(engine ExecEngine, log log.Logger, metrics derive.Metrics,
+func NewEngineController(engine ExecEngine, elClient *sources.EthClient, log log.Logger, metrics derive.Metrics,
 	rollupCfg *rollup.Config, syncCfg *sync.Config, emitter event.Emitter,
 ) *EngineController {
 	syncStatus := syncStatusCL
@@ -96,6 +106,7 @@ func NewEngineController(engine ExecEngine, log log.Logger, metrics derive.Metri
 
 	return &EngineController{
 		engine:     engine,
+		elClient:   elClient,
 		log:        log,
 		metrics:    metrics,
 		chainSpec:  rollup.NewChainSpec(rollupCfg),
@@ -107,7 +118,9 @@ func NewEngineController(engine ExecEngine, log log.Logger, metrics derive.Metri
 	}
 }
 
-// State Getters
+func (e *EngineController) SetEpochInfoGetter(getter EpochInfoGetter) {
+	e.epochInfoGetter = getter
+}
 
 func (e *EngineController) UnsafeL2Head() eth.L2BlockRef {
 	return e.unsafeHead
@@ -145,6 +158,13 @@ func (e *EngineController) IsEngineSyncing() bool {
 
 // SetFinalizedHead implements LocalEngineControl.
 func (e *EngineController) SetFinalizedHead(r eth.L2BlockRef) {
+	if e.epochInfoGetter != nil && e.unsafeHead != (eth.L2BlockRef{}) {
+		currentEpoch, _, _, found := e.epochInfoGetter.GetEpochForBlock(e.unsafeHead.Number)
+		if found && currentEpoch < 2 {
+			e.log.Debug("Skipping finalized head update when current epoch < 2", "current_epoch", currentEpoch, "block", r.Number, "current_head", e.unsafeHead.Number)
+			return
+		}
+	}
 	e.metrics.RecordL2Ref("l2_finalized", r)
 	e.finalizedHead = r
 	e.needFCUCall = true
@@ -164,6 +184,13 @@ func (e *EngineController) SetLocalSafeHead(r eth.L2BlockRef) {
 
 // SetSafeHead sets the cross-safe head.
 func (e *EngineController) SetSafeHead(r eth.L2BlockRef) {
+	if e.epochInfoGetter != nil && e.unsafeHead != (eth.L2BlockRef{}) {
+		currentEpoch, _, _, found := e.epochInfoGetter.GetEpochForBlock(e.unsafeHead.Number)
+		if found && currentEpoch < 1 {
+			e.log.Debug("Skipping safe head update when current epoch < 1", "current_epoch", currentEpoch, "block", r.Number, "current_head", e.unsafeHead.Number)
+			return
+		}
+	}
 	e.metrics.RecordL2Ref("l2_safe", r)
 	e.safeHead = r
 	e.needFCUCall = true
@@ -245,6 +272,12 @@ func (e *EngineController) checkNewPayloadStatus(status eth.ExecutePayloadStatus
 		}
 		// Allow SYNCING and ACCEPTED if engine EL sync is enabled
 		return status == eth.ExecutionValid || status == eth.ExecutionSyncing || status == eth.ExecutionAccepted
+	}
+	// In CL sync mode, also allow ExecutionSyncing when parent blocks are missing
+	// The missing blocks will be requested via P2P, and we can retry processing the payload later
+	if status == eth.ExecutionSyncing {
+		e.log.Debug("Engine is syncing (missing parent blocks), will wait for blocks to arrive via P2P")
+		return true
 	}
 	return status == eth.ExecutionValid
 }
@@ -398,6 +431,19 @@ func (e *EngineController) InsertUnsafePayload(ctx context.Context, envelope *et
 	}
 	newPayloadFinish := time.Now()
 
+	// If engine is syncing (missing parent blocks), don't update forkchoice yet
+	// Wait for missing blocks to arrive via P2P, then retry processing this payload
+	if status.Status == eth.ExecutionSyncing {
+		e.log.Debug("Engine is syncing (missing parent blocks), payload will be retried once blocks arrive",
+			"payload", envelope.ExecutionPayload.ID(),
+			"parent", envelope.ExecutionPayload.ParentID())
+		// Return a temporary error to indicate the payload needs to be retried later
+		// This prevents the payload from being marked as "successfully processed" in events.go
+		// The payload will remain in the queue and be retried once parent blocks arrive
+		return derive.NewTemporaryError(fmt.Errorf("engine is syncing (missing parent blocks), payload will be retried once blocks arrive: payload=%v, parent=%v",
+			envelope.ExecutionPayload.ID(), envelope.ExecutionPayload.ParentID()))
+	}
+
 	// Mark the new payload as valid
 	fc := eth.ForkchoiceState{
 		HeadBlockHash:      envelope.ExecutionPayload.BlockHash,
@@ -447,8 +493,15 @@ func (e *EngineController) InsertUnsafePayload(ctx context.Context, envelope *et
 	}
 
 	if fcRes.PayloadStatus.Status == eth.ExecutionValid || fcRes.PayloadStatus.Status == eth.ExecutionSyncing {
-		e.SetSafeHead(ref)
-		e.SetFinalizedHead(ref)
+		safeRef, finalizedRef, shouldUpdateSafe, shouldUpdateFinalized := e.calculateSafeAndFinalized(ctx, ref)
+		if shouldUpdateSafe && safeRef != (eth.L2BlockRef{}) {
+			e.emitter.Emit(PromoteLocalSafeEvent{
+				Ref: safeRef,
+			})
+		}
+		if shouldUpdateFinalized && finalizedRef != (eth.L2BlockRef{}) {
+			e.SetFinalizedHead(finalizedRef)
+		}
 		e.emitter.Emit(ForkchoiceUpdateEvent{
 			UnsafeL2Head:    e.unsafeHead,
 			SafeL2Head:      e.safeHead,
@@ -545,4 +598,174 @@ func (e *EngineController) TryBackupUnsafeReorg(ctx context.Context) (bool, erro
 	// Execution engine could not reorg back to previous unsafe head.
 	return true, derive.NewTemporaryError(fmt.Errorf("cannot restore unsafe chain using backupUnsafe: err: %w",
 		eth.ForkchoiceUpdateErr(fcRes.PayloadStatus)))
+}
+
+func (e *EngineController) calculateSafeAndFinalized(ctx context.Context, currentRef eth.L2BlockRef) (safeRef eth.L2BlockRef, finalizedRef eth.L2BlockRef, shouldUpdateSafe bool, shouldUpdateFinalized bool) {
+	if e.epochInfoGetter == nil {
+		e.log.Debug("No epoch info getter set, using current block for safe/finalized")
+		return currentRef, currentRef, true, true
+	}
+
+	currentBlockNum := currentRef.Number
+	currentEpoch, currentStartBlock, currentEndBlock, found := e.epochInfoGetter.GetEpochForBlock(currentBlockNum)
+	if !found {
+		if e.elClient != nil {
+			e.log.Debug("Could not find epoch info for current block, trying to get safe/finalized from validator via RPC",
+				"block_number", currentBlockNum)
+			safeRefFromRPC, err := e.elClient.BlockRefByLabel(ctx, eth.Safe)
+			if err != nil {
+				e.log.Debug("Failed to get safe block from validator via RPC, using current block", "err", err)
+				if e.safeHead != (eth.L2BlockRef{}) {
+					safeRef = e.safeHead
+				} else {
+					safeRef = currentRef
+				}
+			} else {
+				safeRef = eth.L2BlockRef{
+					Hash:           safeRefFromRPC.Hash,
+					Number:         safeRefFromRPC.Number,
+					ParentHash:     safeRefFromRPC.ParentHash,
+					Time:           safeRefFromRPC.Time,
+					SequenceNumber: 0,
+				}
+				e.log.Debug("Got safe block from validator via RPC", "safe_block", safeRef.Number)
+			}
+
+			finalizedRefFromRPC, err := e.elClient.BlockRefByLabel(ctx, eth.Finalized)
+			if err != nil {
+				e.log.Debug("Failed to get finalized block from validator via RPC, keeping existing finalized", "err", err)
+				if e.finalizedHead != (eth.L2BlockRef{}) {
+					finalizedRef = e.finalizedHead
+					return safeRef, finalizedRef, true, false
+				}
+				finalizedRef = e.finalizedHead
+				return safeRef, finalizedRef, true, false
+			}
+			finalizedRef = eth.L2BlockRef{
+				Hash:           finalizedRefFromRPC.Hash,
+				Number:         finalizedRefFromRPC.Number,
+				ParentHash:     finalizedRefFromRPC.ParentHash,
+				Time:           finalizedRefFromRPC.Time,
+				SequenceNumber: 0,
+			}
+			if finalizedRef.Number >= currentBlockNum {
+				e.log.Debug("RPC finalized block is ahead of current block, keeping existing finalized",
+					"finalized_from_rpc", finalizedRef.Number, "current_block", currentBlockNum)
+				if e.finalizedHead != (eth.L2BlockRef{}) {
+					finalizedRef = e.finalizedHead
+				}
+				return safeRef, finalizedRef, true, false
+			}
+			e.log.Debug("Got finalized block from validator via RPC", "finalized_block", finalizedRef.Number)
+			return safeRef, finalizedRef, true, true
+		}
+		e.log.Debug("No epoch info and no elClient, skipping finalized update to avoid invalid state")
+		finalizedRef = e.finalizedHead
+		if finalizedRef == (eth.L2BlockRef{}) {
+			finalizedRef = currentRef
+		}
+		return currentRef, finalizedRef, true, false
+	}
+
+	shouldUpdateSafe = currentEpoch >= 1
+	shouldUpdateFinalized = currentEpoch >= 2
+
+	if currentEpoch == 0 {
+		e.log.Debug("In epoch 0, not updating safe/finalized", "current_block", currentBlockNum)
+		if e.safeHead != (eth.L2BlockRef{}) {
+			safeRef = e.safeHead
+		}
+		if e.finalizedHead != (eth.L2BlockRef{}) {
+			finalizedRef = e.finalizedHead
+		}
+		return safeRef, finalizedRef, false, false
+	}
+
+	var safeBlockNum uint64
+	if currentEpoch > 0 {
+		if currentStartBlock > 0 {
+			prevEpochBlockNum := currentStartBlock - 1
+			_, _, prevEndBlock, prevFound := e.epochInfoGetter.GetEpochForBlock(prevEpochBlockNum)
+			if prevFound {
+				safeBlockNum = prevEndBlock
+			} else {
+				safeBlockNum = currentStartBlock - 1
+			}
+		} else {
+			safeBlockNum = 0
+		}
+	} else {
+		safeBlockNum = 0
+	}
+
+	var finalizedBlockNum uint64
+	if currentEpoch > 1 {
+		if currentStartBlock > 0 {
+			prevEpochBlockNum := currentStartBlock - 1
+			_, prevStartBlock, _, prevFound := e.epochInfoGetter.GetEpochForBlock(prevEpochBlockNum)
+			if prevFound && prevStartBlock > 0 {
+				prev2EpochBlockNum := prevStartBlock - 1
+				_, _, prev2EndBlock, prev2Found := e.epochInfoGetter.GetEpochForBlock(prev2EpochBlockNum)
+				if prev2Found {
+					finalizedBlockNum = prev2EndBlock
+				} else {
+					finalizedBlockNum = prevStartBlock - 1
+				}
+			} else {
+				epochLength := currentEndBlock - currentStartBlock + 1
+				if currentStartBlock > epochLength*2 {
+					finalizedBlockNum = currentStartBlock - epochLength*2
+				} else {
+					finalizedBlockNum = 0
+				}
+			}
+		} else {
+			finalizedBlockNum = 0
+		}
+	} else {
+		finalizedBlockNum = 0
+	}
+
+	var err error
+	if safeBlockNum < currentBlockNum {
+		safeRef, err = e.engine.L2BlockRefByNumber(ctx, safeBlockNum)
+		if err != nil {
+			e.log.Warn("Failed to get safe block reference", "block_number", safeBlockNum, "err", err)
+			if e.safeHead != (eth.L2BlockRef{}) {
+				safeRef = e.safeHead
+			}
+		}
+	} else {
+		if e.safeHead != (eth.L2BlockRef{}) {
+			safeRef = e.safeHead
+		} else {
+			safeRef = currentRef
+		}
+	}
+
+	if finalizedBlockNum < currentBlockNum {
+		finalizedRef, err = e.engine.L2BlockRefByNumber(ctx, finalizedBlockNum)
+		if err != nil {
+			e.log.Warn("Failed to get finalized block reference", "block_number", finalizedBlockNum, "err", err)
+			if e.finalizedHead != (eth.L2BlockRef{}) {
+				finalizedRef = e.finalizedHead
+			}
+		}
+	} else {
+		if e.finalizedHead != (eth.L2BlockRef{}) {
+			finalizedRef = e.finalizedHead
+		} else {
+			finalizedRef = currentRef
+		}
+	}
+
+	e.log.Debug("Calculated safe and finalized blocks based on epoch",
+		"current_block", currentBlockNum,
+		"current_epoch", currentEpoch,
+		"safe_block", safeBlockNum,
+		"finalized_block", finalizedBlockNum,
+		"should_update_safe", shouldUpdateSafe,
+		"should_update_finalized", shouldUpdateFinalized)
+
+	return safeRef, finalizedRef, shouldUpdateSafe, shouldUpdateFinalized
 }

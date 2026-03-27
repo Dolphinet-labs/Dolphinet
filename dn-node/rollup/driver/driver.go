@@ -83,6 +83,7 @@ type EngineController interface {
 	InsertUnsafePayload(ctx context.Context, payload *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
 	TryUpdateEngine(ctx context.Context) error
 	TryBackupUnsafeReorg(ctx context.Context) (bool, error)
+	SetEpochInfoGetter(getter engine.EpochInfoGetter)
 }
 
 type CLSync interface {
@@ -161,6 +162,7 @@ func NewDriver(
 	syncCfg *sync.Config,
 	managedMode bool,
 	batchSize int,
+	blockProducerChecker sequencing.BlockProducerChecker,
 ) *Driver {
 	driverCtx, driverCancel := context.WithCancel(context.Background())
 
@@ -169,7 +171,7 @@ func NewDriver(
 	statusTracker := status.NewStatusTracker(log, metrics)
 	sys.Register("status", statusTracker, opts)
 
-	ec := engine.NewEngineController(l2, log, metrics, cfg, syncCfg,
+	ec := engine.NewEngineController(l2, elClient, log, metrics, cfg, syncCfg,
 		sys.Register("engine-controller", nil, opts))
 
 	sys.Register("engine-reset",
@@ -218,7 +220,10 @@ func NewDriver(
 		asyncGossiper := async.NewAsyncGossiper(driverCtx, network, log, metrics)
 		attrBuilder := derive.NewFetchingAttributesBuilder(cfg, l2)
 		sequencer = sequencing.NewSequencer(driverCtx, log, cfg, attrBuilder,
-			sequencerStateListener, asyncGossiper, metrics)
+			sequencerStateListener, asyncGossiper, metrics, driverCfg.PosMode, driverCfg.PoSActivationBlock, driverCfg.LegacySequencer)
+		if blockProducerChecker != nil {
+			sequencer.SetBlockProducerChecker(blockProducerChecker)
+		}
 		sys.Register("sequencer", sequencer, opts)
 	} else {
 		sequencer = sequencing.DisabledSequencer{}

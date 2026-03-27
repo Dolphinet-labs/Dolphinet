@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -162,4 +163,65 @@ func (n *nodeAPI) RollupConfig(_ context.Context) (*rollup.Config, error) {
 
 func (n *nodeAPI) Version(ctx context.Context) (string, error) {
 	return version.Version + "-" + version.Meta, nil
+}
+
+type opNodeAPI struct {
+	node *OpNode
+	log  log.Logger
+}
+
+func NewOpNodeAPI(node *OpNode) *opNodeAPI {
+	return &opNodeAPI{
+		node: node,
+		log:  node.log,
+	}
+}
+
+// PublishTransactions accepts hex-encoded transaction data and forwards them via P2P
+// This is called by geth when non-sequencer nodes receive transactions
+func (api *opNodeAPI) PublishTransactions(ctx context.Context, txHexes []string) error {
+	if len(txHexes) == 0 {
+		return nil
+	}
+
+	// Decode hex-encoded transactions
+	txs := make([]*types.Transaction, 0, len(txHexes))
+	for _, txHex := range txHexes {
+		txData, err := hexutil.Decode(txHex)
+		if err != nil {
+			api.log.Warn("Failed to decode transaction hex", "err", err)
+			continue
+		}
+		tx := new(types.Transaction)
+		if err := tx.UnmarshalBinary(txData); err != nil {
+			api.log.Warn("Failed to unmarshal transaction", "err", err)
+			continue
+		}
+		txs = append(txs, tx)
+	}
+
+	if len(txs) == 0 {
+		return fmt.Errorf("no valid transactions to publish")
+	}
+
+	return api.node.PublishTransactions(ctx, txs)
+}
+
+func (api *opNodeAPI) GetValidatorForBlock(ctx context.Context, blockNumber hexutil.Uint64) (common.Address, error) {
+	api.node.epochScheduleMu.RLock()
+	schedule := api.node.currentEpochSchedule
+	api.node.epochScheduleMu.RUnlock()
+
+	if schedule == nil {
+		return common.Address{}, fmt.Errorf("no epoch schedule available")
+	}
+
+	blockNum := uint64(blockNumber)
+	for _, assignment := range schedule.Assignments {
+		if assignment.BlockNumber == blockNum {
+			return assignment.Validator, nil
+		}
+	}
+
+	return common.Address{}, fmt.Errorf("no validator assignment found for block %d", blockNum)
 }

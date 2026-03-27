@@ -21,7 +21,7 @@ func GweiToWei(gwei float64) (*big.Int, error) {
 	// convert float GWei value into integer Wei value
 	wei, _ := new(big.Float).Mul(
 		big.NewFloat(gwei),
-		big.NewFloat(params.GWei)).
+		big.NewFloat(params.DOLGWei)).
 		Int(nil)
 
 	if wei.Cmp(abi.MaxUint256) == 1 {
@@ -46,8 +46,8 @@ var (
 
 // some internal helper constant values
 var (
-	weiPerGWei = uint256.NewInt(params.GWei)
-	weiPerEth  = uint256.NewInt(params.Ether)
+	weiPerGWei = uint256.NewInt(params.DOLGWei)
+	weiPerEth  = uint256.NewInt(params.DOL)
 )
 
 // ETH is a typed ETH (test-)currency integer, expressed in number of wei.

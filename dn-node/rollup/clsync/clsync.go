@@ -153,9 +153,22 @@ func (eq *CLSync) fromQueue(x engine.ForkchoiceUpdateEvent) (pop bool, abort boo
 
 	// Ensure that the unsafe payload builds upon the current unsafe head
 	if first.ParentHash != x.UnsafeL2Head.Hash {
-		if uint64(first.BlockNumber) == x.UnsafeL2Head.Number+1 {
-			eq.log.Info("skipping unsafe payload, since it does not build onto the existing unsafe chain", "safe", x.SafeL2Head.ID(), "unsafe", x.UnsafeL2Head.ID(), "unsafe_payload", first.ID())
-			return true, false
+		if uint64(first.BlockNumber) > x.UnsafeL2Head.Number {
+			// The block is ahead of our chain, but parent hash doesn't match
+			// In PoS mode, this likely means we're missing parent blocks from validator1
+			// We should try to process this block anyway - the engine will handle it:
+			// - If parent is missing, engine returns ExecutionSyncing, and checkForGapInUnsafeQueue will request missing blocks
+			// - If it's a fork, engine will handle the reorg
+			eq.log.Info("unsafe payload parent doesn't match current unsafe head, attempting to process anyway",
+				"safe", x.SafeL2Head.ID(),
+				"unsafe", x.UnsafeL2Head.ID(),
+				"unsafe_payload", first.ID(),
+				"payload_parent", first.ParentID(),
+				"current_unsafe_hash", x.UnsafeL2Head.Hash,
+				"gap_size", uint64(first.BlockNumber)-x.UnsafeL2Head.Number-1)
+			// Don't skip, let the engine try to process it
+			// The engine's NewPayload will handle missing parents or reorgs as needed
+			return false, false
 		}
 		return false, true // rollup-node should try something different if it cannot process the first unsafe payload
 	}

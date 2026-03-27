@@ -79,6 +79,10 @@ func PayloadByNumberProtocolID(l2ChainID *big.Int) protocol.ID {
 	return protocol.ID(fmt.Sprintf("/opstack/req/payload_by_number/%d/0", l2ChainID))
 }
 
+func L2HeadProtocolID(l2ChainID *big.Int) protocol.ID {
+	return protocol.ID(fmt.Sprintf("/opstack/req/l2_head/%d/0", l2ChainID))
+}
+
 type requestHandlerFn func(ctx context.Context, log log.Logger, stream network.Stream)
 
 func MakeStreamHandler(resourcesCtx context.Context, log log.Logger, fn requestHandlerFn) network.StreamHandler {
@@ -233,6 +237,7 @@ type SyncClient struct {
 
 	newStreamFn     newStreamFn
 	payloadByNumber protocol.ID
+	l2HeadProtocol  protocol.ID
 
 	peersLock sync.Mutex
 	// syncing worker per peer
@@ -291,6 +296,7 @@ func NewSyncClient(log log.Logger, cfg *rollup.Config, host HostNewStream, rcv r
 		appScorer:           appScorer,
 		newStreamFn:         host.NewStream,
 		payloadByNumber:     PayloadByNumberProtocolID(cfg.L2ChainID),
+		l2HeadProtocol:      L2HeadProtocolID(cfg.L2ChainID),
 		peers:               make(map[peer.ID]context.CancelFunc),
 		quarantineByNum:     make(map[uint64]common.Hash),
 		rangeRequests:       make(chan rangeRequest), // blocking
@@ -371,8 +377,13 @@ func (s *SyncClient) Close() error {
 
 func (s *SyncClient) RequestL2Range(ctx context.Context, start, end eth.L2BlockRef) (uint64, error) {
 	if end == (eth.L2BlockRef{}) {
-		s.log.Debug("P2P sync client received range signal, but cannot sync open-ended chain: need sync target to verify blocks through parent-hashes", "start", start)
-		return 0, nil
+		peerEnd, err := s.fetchSyncTargetFromPeers(ctx, start)
+		if err != nil || peerEnd == (eth.L2BlockRef{}) || peerEnd.Number <= start.Number {
+			s.log.Debug("P2P sync client received open-ended range, could not get sync target from peers", "start", start, "err", err)
+			return 0, nil
+		}
+		end = peerEnd
+		s.log.Info("P2P sync client using peer L2 head as sync target for open-ended range", "start", start, "end", end)
 	}
 	// Create shared rangeReqId so associated peerRequests can all be cancelled by setting a single flag
 	rangeReqId := atomic.AddUint64(&s.rangeReqId, 1)
@@ -392,7 +403,53 @@ func (s *SyncClient) RequestL2Range(ctx context.Context, start, end eth.L2BlockR
 const (
 	maxRequestScheduling = time.Second * 3
 	maxResultProcessing  = time.Second * 3
+	l2HeadRequestTimeout = time.Second * 5
+	l2HeadResponseSize   = 8 + 32 + 32 // number (8) + hash (32) + parentHash (32)
 )
+
+func (s *SyncClient) fetchSyncTargetFromPeers(ctx context.Context, start eth.L2BlockRef) (eth.L2BlockRef, error) {
+	s.peersLock.Lock()
+	peerIDs := make([]peer.ID, 0, len(s.peers))
+	for id := range s.peers {
+		peerIDs = append(peerIDs, id)
+	}
+	s.peersLock.Unlock()
+	if len(peerIDs) == 0 {
+		return eth.L2BlockRef{}, fmt.Errorf("no peers available")
+	}
+	for _, id := range peerIDs {
+		ref, err := s.fetchL2HeadFromPeer(ctx, id)
+		if err != nil {
+			s.log.Debug("failed to fetch L2 head from peer", "peer", id, "err", err)
+			continue
+		}
+		if ref.Number > start.Number {
+			return ref, nil
+		}
+	}
+	return eth.L2BlockRef{}, fmt.Errorf("no peer reported head above start")
+}
+
+func (s *SyncClient) fetchL2HeadFromPeer(ctx context.Context, id peer.ID) (eth.L2BlockRef, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, l2HeadRequestTimeout)
+	defer cancel()
+	stream, err := s.newStreamFn(reqCtx, id, s.l2HeadProtocol)
+	if err != nil {
+		return eth.L2BlockRef{}, err
+	}
+	defer stream.Close()
+	_ = stream.SetReadDeadline(time.Now().Add(l2HeadRequestTimeout))
+	buf := make([]byte, l2HeadResponseSize)
+	if _, err := io.ReadFull(stream, buf); err != nil {
+		return eth.L2BlockRef{}, err
+	}
+	ref := eth.L2BlockRef{
+		Number:     binary.LittleEndian.Uint64(buf[0:8]),
+		Hash:       common.BytesToHash(buf[8:40]),
+		ParentHash: common.BytesToHash(buf[40:72]),
+	}
+	return ref, nil
+}
 
 func (s *SyncClient) mainLoop() {
 	defer s.wg.Done()
@@ -785,6 +842,7 @@ type peerStat struct {
 
 type L2Chain interface {
 	PayloadByNumber(ctx context.Context, number uint64) (*eth.ExecutionPayloadEnvelope, error)
+	L2Head(ctx context.Context) (eth.L2BlockRef, error)
 }
 
 type ReqRespServerMetrics interface {
@@ -854,6 +912,24 @@ func (srv *ReqRespServer) HandleSyncRequest(ctx context.Context, log log.Logger,
 	srv.metrics.ServerPayloadByNumberEvent(req, resultCode, time.Since(start))
 }
 
+func (srv *ReqRespServer) HandleL2HeadRequest(ctx context.Context, log log.Logger, stream network.Stream) {
+	defer stream.Close()
+	head, err := srv.l2.L2Head(ctx)
+	if err != nil {
+		log.Warn("failed to get L2 head for peer", "err", err)
+		_ = stream.Reset()
+		return
+	}
+	buf := make([]byte, l2HeadResponseSize)
+	binary.LittleEndian.PutUint64(buf[0:8], head.Number)
+	copy(buf[8:40], head.Hash.Bytes())
+	copy(buf[40:72], head.ParentHash.Bytes())
+	_ = stream.SetWriteDeadline(time.Now().Add(serverWriteChunkTimeout))
+	if _, err := stream.Write(buf); err != nil {
+		log.Debug("failed to write L2 head response", "err", err)
+	}
+}
+
 var errInvalidRequest = errors.New("invalid request")
 
 func (srv *ReqRespServer) handleSyncRequest(ctx context.Context, stream network.Stream) (uint64, error) {
@@ -918,6 +994,17 @@ func (srv *ReqRespServer) handleSyncRequest(ctx context.Context, stream network.
 			return req, fmt.Errorf("failed to retrieve payload to serve to peer: %w", err)
 		}
 	}
+	if envelope == nil {
+		return req, fmt.Errorf("PayloadByNumber returned nil envelope without error")
+	}
+	if envelope.ExecutionPayload == nil {
+		return req, fmt.Errorf("envelope has nil ExecutionPayload")
+	}
+
+	if envelope.ParentBeaconBlockRoot == nil {
+		zeroHash := common.Hash{}
+		envelope.ParentBeaconBlockRoot = &zeroHash
+	}
 
 	// We set write deadline, if available, to safely write without blocking on a throttling peer connection
 	_ = stream.SetWriteDeadline(time.Now().Add(serverWriteChunkTimeout))
@@ -931,8 +1018,14 @@ func (srv *ReqRespServer) handleSyncRequest(ctx context.Context, stream network.
 		if _, err := stream.Write(tmp[:]); err != nil {
 			return req, fmt.Errorf("failed to write response header data: %w", err)
 		}
-		if _, err := envelope.MarshalSSZ(w); err != nil {
-			return req, fmt.Errorf("failed to write payload to sync response: %w", err)
+		if envelope.ParentBeaconBlockRoot == nil {
+			if _, err := envelope.ExecutionPayload.MarshalSSZ(w); err != nil {
+				return req, fmt.Errorf("failed to write payload to sync response: %w", err)
+			}
+		} else {
+			if _, err := envelope.MarshalSSZ(w); err != nil {
+				return req, fmt.Errorf("failed to write payload to sync response: %w", err)
+			}
 		}
 	} else {
 		// 0 - resultCode: success = 0
