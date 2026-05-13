@@ -469,10 +469,34 @@ func (n *OpNode) initManagerClient(ctx context.Context, cfg *Config) error {
 
 	// Set epoch schedule callback
 	client.SetOnEpochSchedule(func(schedule pos.EpochSchedule) error {
+		assignCount := len(schedule.Assignments)
+		var assignMin, assignMax uint64
+		if assignCount > 0 {
+			assignMin = schedule.Assignments[0].BlockNumber
+			assignMax = assignMin
+			for i := 1; i < assignCount; i++ {
+				bn := schedule.Assignments[i].BlockNumber
+				if bn < assignMin {
+					assignMin = bn
+				}
+				if bn > assignMax {
+					assignMax = bn
+				}
+			}
+		}
 		n.log.Info("Received epoch schedule from manager",
 			"epoch", schedule.Epoch,
 			"start_block", schedule.StartBlock,
-			"end_block", schedule.EndBlock)
+			"end_block", schedule.EndBlock,
+			"assignments_len", assignCount,
+			"assignment_block_min", assignMin,
+			"assignment_block_max", assignMax)
+		if assignCount == 0 && schedule.EndBlock >= schedule.StartBlock {
+			n.log.Warn("epoch schedule has empty assignments; PoS cannot match unsafe+1 to a producer",
+				"epoch", schedule.Epoch,
+				"start_block", schedule.StartBlock,
+				"end_block", schedule.EndBlock)
+		}
 
 		// Store current epoch schedule for determining block producer
 		n.epochScheduleMu.Lock()
@@ -923,22 +947,54 @@ func (n *OpNode) isCurrentBlockProducer(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-func (n *OpNode) IsBlockProducerFor(nextBlock uint64) bool {
+// PoSProducerDiag summarizes the current epoch schedule vs nextBlock (for sequencer logs).
+func (n *OpNode) PoSProducerDiag(nextBlock uint64) sequencing.BlockProducerDiag {
+	var d sequencing.BlockProducerDiag
 	if !n.cfg.Driver.PosMode {
-		return false
+		d.PoSInactive = true
+		return d
 	}
 	n.epochScheduleMu.RLock()
-	schedule := n.currentEpochSchedule
+	s := n.currentEpochSchedule
 	n.epochScheduleMu.RUnlock()
-	if schedule == nil {
-		return false
+	if s == nil {
+		d.NoEpochSchedule = true
+		return d
 	}
-	for _, assignment := range schedule.Assignments {
+	d.ScheduleEpoch = s.Epoch
+	d.ScheduleStart = s.StartBlock
+	d.ScheduleEnd = s.EndBlock
+	d.AssignmentsLen = len(s.Assignments)
+	d.NextInScheduleRange = nextBlock >= s.StartBlock && nextBlock <= s.EndBlock
+	if len(s.Assignments) > 0 {
+		amin := s.Assignments[0].BlockNumber
+		amax := amin
+		for i := 1; i < len(s.Assignments); i++ {
+			bn := s.Assignments[i].BlockNumber
+			if bn < amin {
+				amin = bn
+			}
+			if bn > amax {
+				amax = bn
+			}
+		}
+		d.AssignmentBlockMin = amin
+		d.AssignmentBlockMax = amax
+	}
+	for _, assignment := range s.Assignments {
 		if assignment.BlockNumber == nextBlock {
-			return assignment.Validator == n.cfg.P2PSignerAddress
+			d.HasAssignmentForNext = true
+			d.EntryValidator = assignment.Validator
+			d.WrongValidator = assignment.Validator != n.cfg.P2PSignerAddress
+			break
 		}
 	}
-	return false
+	return d
+}
+
+func (n *OpNode) IsBlockProducerFor(nextBlock uint64) bool {
+	d := n.PoSProducerDiag(nextBlock)
+	return !d.PoSInactive && !d.NoEpochSchedule && d.HasAssignmentForNext && !d.WrongValidator
 }
 
 func (n *OpNode) RequestL2Range(ctx context.Context, start, end eth.L2BlockRef) error {

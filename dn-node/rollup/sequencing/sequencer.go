@@ -52,8 +52,25 @@ type AsyncGossiper interface {
 	Start()
 }
 
+// BlockProducerDiag captures why a node may or may not produce nextBlock under PoS (for logging).
+type BlockProducerDiag struct {
+	PoSInactive          bool
+	NoEpochSchedule      bool
+	ScheduleEpoch        uint64
+	ScheduleStart        uint64
+	ScheduleEnd          uint64
+	AssignmentsLen       int
+	AssignmentBlockMin   uint64
+	AssignmentBlockMax   uint64
+	NextInScheduleRange  bool
+	HasAssignmentForNext bool
+	WrongValidator       bool
+	EntryValidator       common.Address
+}
+
 type BlockProducerChecker interface {
 	IsBlockProducerFor(nextBlock uint64) bool
+	PoSProducerDiag(nextBlock uint64) BlockProducerDiag
 }
 
 // SequencerActionEvent triggers the sequencer to start/seal a block, if active and ready to act.
@@ -392,7 +409,9 @@ func (d *Sequencer) onSequencerAction(SequencerActionEvent) {
 				nextBlock = d.latestHead.Number + 1
 			}
 			if d.isEffectivePosMode(nextBlock) {
-				d.log.Debug("PoS mode: requesting forkchoice update before building block to ensure chain is synchronized")
+				d.log.Info("PoS mode: sequencer action, requesting forkchoice before build",
+					"next_block", nextBlock,
+					"unsafe_head", d.latestHead.Number)
 				d.pendingSequencerAction.Store(true)
 				d.emitter.Emit(engine.ForkchoiceRequestEvent{})
 				// The forkchoice update will trigger onForkchoiceUpdate, which will check
@@ -479,12 +498,31 @@ func (d *Sequencer) onForkchoiceUpdate(x engine.ForkchoiceUpdateEvent) {
 		// trigger the build now that we have the latest forkchoice state
 		if d.pendingSequencerAction.Load() && d.latest == (BuildingState{}) {
 			d.pendingSequencerAction.Store(false)
-			if d.blockProducerChecker != nil && !d.blockProducerChecker.IsBlockProducerFor(nextBlock) {
-				d.log.Debug("PoS mode: skipping block build, this node is not assigned for block",
-					"block", nextBlock)
-				return
+			if d.blockProducerChecker != nil {
+				diag := d.blockProducerChecker.PoSProducerDiag(nextBlock)
+				ok := !diag.PoSInactive && !diag.NoEpochSchedule && diag.HasAssignmentForNext && !diag.WrongValidator
+				if !ok {
+					d.log.Info("PoS mode: skipping block build after forkchoice",
+						"next_block", nextBlock,
+						"unsafe", x.UnsafeL2Head.Number,
+						"safe", x.SafeL2Head.Number,
+						"pos_inactive", diag.PoSInactive,
+						"no_epoch_schedule", diag.NoEpochSchedule,
+						"schedule_epoch", diag.ScheduleEpoch,
+						"schedule_start", diag.ScheduleStart,
+						"schedule_end", diag.ScheduleEnd,
+						"assignments_len", diag.AssignmentsLen,
+						"assignment_blocks_min", diag.AssignmentBlockMin,
+						"assignment_blocks_max", diag.AssignmentBlockMax,
+						"next_in_schedule_range", diag.NextInScheduleRange,
+						"has_assignment_for_next", diag.HasAssignmentForNext,
+						"wrong_validator", diag.WrongValidator,
+						"entry_validator", diag.EntryValidator,
+					)
+					return
+				}
 			}
-			d.log.Debug("PoS mode: forkchoice updated, triggering pending sequencer action")
+			d.log.Info("PoS mode: forkchoice updated, starting block build", "next_block", nextBlock)
 			d.startBuildingBlock()
 		}
 	} else if x.UnsafeL2Head.Number > d.latestHead.Number {
