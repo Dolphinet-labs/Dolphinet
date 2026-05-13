@@ -266,6 +266,15 @@ func (n *OpNode) initL2(ctx context.Context, cfg *Config) error {
 		blockProducerChecker = n
 	}
 	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.elClient, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, managedMode, cfg.Driver.MaxRequestsPerBatch, blockProducerChecker)
+	n.log.Info("Rollup driver configured",
+		"sequencer_enabled", cfg.Driver.SequencerEnabled,
+		"sequencer_stopped", cfg.Driver.SequencerStopped,
+		"pos_mode", cfg.Driver.PosMode,
+		"pos_activation_block", cfg.Driver.PoSActivationBlock,
+		"legacy_sequencer", cfg.Driver.LegacySequencer,
+		"sequencer_max_safe_lag", cfg.Driver.SequencerMaxSafeLag,
+		"manager_url_configured", cfg.ManagerURL != "",
+		"block_producer_checker_attached", blockProducerChecker != nil)
 
 	n.l2Driver.SetEpochInfoGetter(n)
 

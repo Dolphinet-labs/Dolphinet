@@ -472,6 +472,10 @@ func (d *Sequencer) onForkchoiceUpdate(x engine.ForkchoiceUpdateEvent) {
 	d.log.Debug("Sequencer is processing forkchoice update", "unsafe", x.UnsafeL2Head, "latest", d.latestHead)
 
 	if !d.active.Load() {
+		if d.pendingSequencerAction.Load() {
+			d.log.Warn("Forkchoice update while sequencer inactive; PoS pending action will not run until sequencer is active",
+				"unsafe", x.UnsafeL2Head.Number, "safe", x.SafeL2Head.Number)
+		}
 		d.setLatestHead(x.UnsafeL2Head)
 		return
 	}
@@ -494,6 +498,12 @@ func (d *Sequencer) onForkchoiceUpdate(x engine.ForkchoiceUpdateEvent) {
 	if effectivePosMode {
 		d.nextActionOK = false
 		d.log.Debug("PoS mode active, sequencer not automatically scheduling next block")
+		if d.pendingSequencerAction.Load() && d.latest != (BuildingState{}) {
+			d.log.Info("PoS mode: forkchoice update while block build in-flight; waiting for current job",
+				"unsafe", x.UnsafeL2Head.Number,
+				"building_onto", d.latest.Onto.Number,
+				"has_open_payload_job", d.latest.Info != (eth.PayloadInfo{}))
+		}
 		// If there's a pending sequencer action and we're not building anything,
 		// trigger the build now that we have the latest forkchoice state
 		if d.pendingSequencerAction.Load() && d.latest == (BuildingState{}) {
