@@ -189,6 +189,7 @@ func NewDriverConfig(ctx *cli.Context) *driver.Config {
 		RecoverMode:         ctx.Bool(flags.SequencerRecoverMode.Name),
 		PosMode:             ctx.Bool(flags.PosModeEnabledFlag.Name),
 		LegacySequencer:     ctx.Bool(flags.LegacySequencerFlag.Name),
+		EngineCallTimeout:   ctx.Duration(flags.L2EngineRpcTimeout.Name),
 	}
 }
 

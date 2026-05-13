@@ -19,7 +19,7 @@ func (ev BuildStartEvent) String() string {
 }
 
 func (eq *EngDeriver) onBuildStart(ev BuildStartEvent) {
-	ctx, cancel := context.WithTimeout(eq.ctx, buildStartTimeout)
+	ctx, cancel := context.WithTimeout(eq.ctx, effectiveOpTimeout(eq.engineCallTimeout, buildStartTimeout))
 	defer cancel()
 
 	if eq.ec.PendingSafeL2Head().Hash != ev.Attributes.Parent.Hash {

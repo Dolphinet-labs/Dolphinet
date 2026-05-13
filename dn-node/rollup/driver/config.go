@@ -1,5 +1,7 @@
 package driver
 
+import "time"
+
 type Config struct {
 	// VerifierConfDepth is the distance to keep from the L1 head when reading L1 data for core derivation.
 	VerifierConfDepth uint64 `json:"verifier_conf_depth"`
@@ -42,4 +44,11 @@ type Config struct {
 
 	// Maximum number of requests to make per batch
 	MaxRequestsPerBatch int `json:"max_requests_per_batch"`
+
+	// EngineCallTimeout is applied to engine-deriver operations that wrap RPC calls
+	// (forkchoice+start build, getPayload, newPayload, cancel build) in a context timeout.
+	// Must be >= the execution client's per-call timeout (e.g. l2.engine-rpc-timeout); otherwise
+	// the shorter outer deadline wins and raising only the RPC timeout has no effect.
+	// Zero keeps legacy 10s defaults inside the engine package.
+	EngineCallTimeout time.Duration `json:"engine_call_timeout,omitempty"`
 }

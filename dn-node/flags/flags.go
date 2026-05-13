@@ -160,7 +160,7 @@ var (
 	}
 	L2EngineRpcTimeout = &cli.DurationFlag{
 		Name:     "l2.engine-rpc-timeout",
-		Usage:    "core engine client rpc timeout",
+		Usage:    "timeout for engine JSON-RPC and for engine-deriver operations (FCU, getPayload, newPayload); outer context must not be shorter than this",
 		EnvVars:  prefixEnvVars("L2_ENGINE_RPC_TIMEOUT"),
 		Value:    time.Second * 10,
 		Category: RollupCategory,

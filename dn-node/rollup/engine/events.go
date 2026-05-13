@@ -336,19 +336,22 @@ type EngDeriver struct {
 	ec      *EngineController
 	ctx     context.Context
 	emitter event.Emitter
+	// engineCallTimeout, when >0, overrides the 10s defaults for FCU/getPayload/newPayload/cancel contexts.
+	engineCallTimeout time.Duration
 }
 
 var _ event.Deriver = (*EngDeriver)(nil)
 
 func NewEngDeriver(log log.Logger, ctx context.Context, cfg *rollup.Config,
-	metrics Metrics, ec *EngineController,
+	metrics Metrics, ec *EngineController, engineCallTimeout time.Duration,
 ) *EngDeriver {
 	return &EngDeriver{
-		log:     log,
-		cfg:     cfg,
-		ec:      ec,
-		ctx:     ctx,
-		metrics: metrics,
+		log:               log,
+		cfg:               cfg,
+		ec:                ec,
+		ctx:               ctx,
+		metrics:           metrics,
+		engineCallTimeout: engineCallTimeout,
 	}
 }
 

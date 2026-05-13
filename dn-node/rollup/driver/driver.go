@@ -210,7 +210,7 @@ func NewDriver(
 	}
 	sys.Register("sync", syncDeriver, opts)
 
-	sys.Register("engine", engine.NewEngDeriver(log, driverCtx, cfg, metrics, ec), opts)
+	sys.Register("engine", engine.NewEngDeriver(log, driverCtx, cfg, metrics, ec, driverCfg.EngineCallTimeout), opts)
 
 	schedDeriv := NewStepSchedulingDeriver(log)
 	sys.Register("step-scheduler", schedDeriv, opts)

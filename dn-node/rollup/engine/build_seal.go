@@ -52,7 +52,7 @@ func (ev BuildSealEvent) String() string {
 }
 
 func (eq *EngDeriver) onBuildSeal(ev BuildSealEvent) {
-	ctx, cancel := context.WithTimeout(eq.ctx, buildSealTimeout)
+	ctx, cancel := context.WithTimeout(eq.ctx, effectiveOpTimeout(eq.engineCallTimeout, buildSealTimeout))
 	defer cancel()
 
 	sealingStart := time.Now()

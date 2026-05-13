@@ -24,7 +24,7 @@ func (ev PayloadProcessEvent) String() string {
 }
 
 func (eq *EngDeriver) onPayloadProcess(ev PayloadProcessEvent) {
-	ctx, cancel := context.WithTimeout(eq.ctx, payloadProcessTimeout)
+	ctx, cancel := context.WithTimeout(eq.ctx, effectiveOpTimeout(eq.engineCallTimeout, payloadProcessTimeout))
 	defer cancel()
 
 	insertStart := time.Now()

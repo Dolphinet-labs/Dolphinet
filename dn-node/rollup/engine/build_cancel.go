@@ -20,7 +20,7 @@ func (ev BuildCancelEvent) String() string {
 }
 
 func (eq *EngDeriver) onBuildCancel(ev BuildCancelEvent) {
-	ctx, cancel := context.WithTimeout(eq.ctx, buildCancelTimeout)
+	ctx, cancel := context.WithTimeout(eq.ctx, effectiveOpTimeout(eq.engineCallTimeout, buildCancelTimeout))
 	defer cancel()
 	// the building job gets wrapped up as soon as the payload is retrieved, there's no explicit cancel in the Engine API
 	eq.log.Warn("cancelling old block building job", "info", ev.Info)
