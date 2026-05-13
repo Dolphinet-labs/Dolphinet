@@ -534,7 +534,7 @@ func (c *ManagerClient) handleMessage(data []byte) error {
 	return nil
 }
 
-func (c *ManagerClient) RegisterWithBlockNumber(nextBlockNumber uint64) error {
+func (c *ManagerClient) RegisterWithBlockNumber() error {
 	if c.validatorAddr == (common.Address{}) {
 		c.log.Warn("Validator address not set, skipping registration")
 		return nil
@@ -557,7 +557,7 @@ func (c *ManagerClient) RegisterWithBlockNumber(nextBlockNumber uint64) error {
 	msg := NodeRegisterMessage{
 		Type:               MessageTypeNodeRegister,
 		Address:            c.validatorAddr,
-		CurrentBlockNumber: nextBlockNumber,
+		CurrentBlockNumber: 0,
 		Bootnodes:          bootnodes,
 	}
 
@@ -586,7 +586,7 @@ func (c *ManagerClient) RegisterWithBlockNumber(nextBlockNumber uint64) error {
 	c.registeredAcked = false
 	c.registerRequestedAt = time.Now()
 	c.registeredMu.Unlock()
-	c.log.Info("Registered node with manager", "address", c.validatorAddr.Hex(), "next_block_number", nextBlockNumber)
+	c.log.Info("Registered node with manager", "address", c.validatorAddr.Hex())
 	return nil
 }
 

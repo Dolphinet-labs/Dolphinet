@@ -687,16 +687,7 @@ func (n *OpNode) posRegisterLoop(ctx context.Context) {
 			if n.managerClient == nil || !n.managerClient.IsConnected() {
 				continue
 			}
-			status, err := n.l2Driver.SyncStatus(ctx)
-			if err != nil || status == nil {
-				continue
-			}
-			nextBlock := status.UnsafeL2.Number + 1
-			if n.cfg.PoSActivationBlock != 0 && nextBlock < n.cfg.PoSActivationBlock {
-				n.log.Debug("PoS registration deferred until activation height", "next_block", nextBlock, "pos_activation_block", n.cfg.PoSActivationBlock)
-				continue
-			}
-			if err := n.managerClient.RegisterWithBlockNumber(nextBlock); err != nil {
+			if err := n.managerClient.RegisterWithBlockNumber(); err != nil {
 				n.log.Warn("Failed to register with manager", "err", err)
 			}
 		}
