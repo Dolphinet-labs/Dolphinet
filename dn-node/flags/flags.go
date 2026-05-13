@@ -301,6 +301,14 @@ var (
 		Value:   false,
 		Hidden:  true,
 	}
+	FindHeadsTimeoutFlag = &cli.DurationFlag{
+		Name: "sync.find-heads-timeout",
+		Usage: "Upper bound on how long engine-reset head discovery (FindL2Heads) may run; avoids hanging indefinitely on slow EL RPC. " +
+			"0 disables this extra deadline (only the process context applies).",
+		EnvVars:  prefixEnvVars("SYNC_FIND_HEADS_TIMEOUT"),
+		Value:    0,
+		Category: RollupCategory,
+	}
 	BetaExtraNetworks = &cli.BoolFlag{
 		Name:    "beta.extra-networks",
 		Usage:   "Legacy flag, ignored, all superchain-registry networks are enabled by default.",
@@ -427,6 +435,7 @@ var requiredFlags = []cli.Flag{
 
 var optionalFlags = []cli.Flag{
 	SyncModeFlag,
+	FindHeadsTimeoutFlag,
 	FetchWithdrawalRootFromState,
 	RPCListenAddr,
 	RPCListenPort,

@@ -140,6 +140,24 @@ func FindL2Heads(ctx context.Context, cfg *rollup.Config, l2 L2Chain, lgr log.Lo
 	// Remember original unsafe block to determine reorg depth
 	prevUnsafe := result.Unsafe
 
+	// When EL's finalized label has lagged far behind unsafe (e.g. sequencer never updated FCU
+	// safe/finalized), the parent-walk below can require millions of L2BlockRefByHash RPCs and block
+	// engine reset indefinitely — while reset is stuck the sequencer cannot seal blocks to fix FCU.
+	// This fast-path matches the loop's terminal state at the finalized block number and breaks that cycle.
+	const maxFindHeadsParentWalk = 65536
+	if prevUnsafe.Number > result.Finalized.Number {
+		gap := prevUnsafe.Number - result.Finalized.Number
+		if gap > maxFindHeadsParentWalk {
+			lgr.Warn("FindL2Heads: unsafe-finalized gap too large to walk parents; using EL unsafe + finalized for reset (upgrade node so FCU keeps safe/finalized near head)",
+				"unsafe", prevUnsafe.Number, "safe_label", result.Safe.Number, "finalized_label", result.Finalized.Number, "gap", gap, "walk_limit", maxFindHeadsParentWalk)
+			return &FindHeadsResult{
+				Unsafe:    prevUnsafe,
+				Safe:      result.Finalized,
+				Finalized: result.Finalized,
+			}, nil
+		}
+	}
+
 	// Current core block.
 	n := result.Unsafe
 

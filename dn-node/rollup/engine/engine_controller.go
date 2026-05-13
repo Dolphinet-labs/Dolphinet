@@ -769,3 +769,20 @@ func (e *EngineController) calculateSafeAndFinalized(ctx context.Context, curren
 
 	return safeRef, finalizedRef, shouldUpdateSafe, shouldUpdateFinalized
 }
+
+// SyncEpochForkchoiceLabels updates safe/finalized from the epoch schedule after the unsafe head
+// advances on the sequencer path (NewPayload + PromoteUnsafe). InsertUnsafePayload already runs
+// calculateSafeAndFinalized internally; without this, FCU would keep stale safe/finalized while
+// unsafe grows, causing huge gaps in EL forkchoice labels and very slow FindL2Heads walks.
+func (e *EngineController) SyncEpochForkchoiceLabels(ctx context.Context, unsafeRef eth.L2BlockRef) {
+	if e.epochInfoGetter == nil {
+		return
+	}
+	safeRef, finalizedRef, shouldUpdateSafe, shouldUpdateFinalized := e.calculateSafeAndFinalized(ctx, unsafeRef)
+	if shouldUpdateSafe && safeRef != (eth.L2BlockRef{}) {
+		e.emitter.Emit(PromoteLocalSafeEvent{Ref: safeRef})
+	}
+	if shouldUpdateFinalized && finalizedRef != (eth.L2BlockRef{}) {
+		e.SetFinalizedHead(finalizedRef)
+	}
+}

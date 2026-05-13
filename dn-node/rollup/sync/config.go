@@ -3,6 +3,7 @@ package sync
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Mode int
@@ -72,4 +73,8 @@ type Config struct {
 	SkipSyncStartCheck bool `json:"skip_sync_start_check"`
 
 	SupportsPostFinalizationELSync bool `json:"supports_post_finalization_elsync"`
+
+	// FindHeadsTimeout bounds how long FindL2Heads may run during engine reset (L2 parent walks + L1 checks).
+	// Zero disables an extra timeout (only the node process context applies).
+	FindHeadsTimeout time.Duration `json:"find_heads_timeout"`
 }

@@ -460,6 +460,7 @@ func (d *EngDeriver) OnEvent(ev event.Event) bool {
 			d.ec.SetBackupUnsafeL2Head(d.ec.unsafeHead, false)
 		}
 		d.ec.SetUnsafeHead(x.Ref)
+		d.ec.SyncEpochForkchoiceLabels(d.ctx, x.Ref)
 		d.emitter.Emit(UnsafeUpdateEvent(x))
 	case UnsafeUpdateEvent:
 		// pre-interop everything that is local-unsafe is also immediately cross-unsafe.
